@@ -82,7 +82,16 @@ app.add_middleware(
 
 if settings.is_production:
     hosts = [o.replace("https://", "").replace("http://", "") for o in settings.CORS_ORIGINS]
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*hosts, "localhost", "127.0.0.1"])
+    
+    app.add_middleware(
+        TrustedHostMiddleware, 
+        allowed_hosts=[
+            *hosts, 
+            "localhost", 
+            "127.0.0.1", 
+            "ca-backend.maktechgroups.com"
+        ]
+    )
 
 
 @app.middleware("http")
