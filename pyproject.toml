@@ -1,0 +1,51 @@
+[project]
+name = "coach-auto-api"
+version = "1.0.0"
+description = "Coach Auto — Autonomy Health and Fitness. Online coaching platform API."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.3",
+    "gunicorn==26.0.0",
+    "sqlalchemy[asyncio]==2.0.52",
+    "alembic==1.19.1",
+    "asyncpg==0.31.0",
+    "greenlet==3.5.5",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "email-validator==2.3.0",
+    "pyjwt==2.13.0",
+    "pwdlib[argon2]==0.3.1",
+    "python-multipart==0.0.32",
+    "slowapi==0.1.10",
+    "aiosmtplib==5.1.2",
+    "jinja2==3.1.6",
+    "pillow==12.3.0",
+    "structlog==26.1.0",
+    "python-slugify==8.0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.3.0",
+    "httpx==0.28.1",
+    "ruff==0.16.3",
+    "aiosqlite==0.21.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "C4", "SIM"]
+ignore = ["B008"]  # FastAPI Depends() in defaults is intentional
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# asyncpg pins connections to the loop that created them, so fixtures and tests
+# must share one session-wide loop or the engine breaks between tests.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
