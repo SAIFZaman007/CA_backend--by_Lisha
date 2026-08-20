@@ -16,9 +16,12 @@ from app.models.enums import (
     SessionStatus,
     Sex,
     TrainingLevel,
+    TutorialCategory,
     UnitSystem,
     UserRole,
+    VideoProvider,
 )
+from app.models.media import VideoTutorial
 from app.models.nutrition import Meal, MealItem, MealLog, MealPlan
 from app.models.tracking import (
     BodyMeasurement,
@@ -62,9 +65,12 @@ __all__ = [
     "SleepLog",
     "Testimonial",
     "TrainingLevel",
+    "TutorialCategory",
     "UnitSystem",
     "User",
     "UserRole",
+    "VideoProvider",
+    "VideoTutorial",
     "WeightLog",
     "WorkoutDay",
     "WorkoutDayExercise",

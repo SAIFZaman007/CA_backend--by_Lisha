@@ -101,3 +101,24 @@ class BookingStatus(StrEnum):
     CONFIRMED = "confirmed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+class TutorialCategory(StrEnum):
+    """How the tutorial library is shelved for clients."""
+
+    GETTING_STARTED = "getting_started"
+    FORM_TECHNIQUE = "form_technique"
+    WARM_UP = "warm_up"
+    MOBILITY = "mobility"
+    CARDIO = "cardio"
+    NUTRITION = "nutrition"
+    EQUIPMENT = "equipment"
+    RECOVERY = "recovery"
+
+
+class VideoProvider(StrEnum):
+    """Where the recording is hosted. Drives how the player is embedded."""
+
+    YOUTUBE = "youtube"
+    VIMEO = "vimeo"
+    DIRECT = "direct"

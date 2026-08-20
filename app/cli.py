@@ -33,7 +33,7 @@ async def _seed() -> None:
 
 async def _create_coach() -> None:
     email = input("Coach email: ").strip().lower()
-    password = getpass.getpass("Password (min 10 chars): ")
+    password = getpass.getpass("Password (min 10 chars): ") 
     if len(password) < 10:
         sys.exit("Password too short. Use at least 10 characters.")
 

@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    admin,
     auth,
     calculators,
     dashboard,
@@ -11,6 +12,7 @@ from app.api.v1.endpoints import (
     nutrition,
     progress,
     public,
+    tutorials,
     users,
     wellness,
     workouts,
@@ -33,4 +35,8 @@ api_router.include_router(exercises.router)
 api_router.include_router(nutrition.router)
 api_router.include_router(progress.router)
 api_router.include_router(wellness.router)
+api_router.include_router(tutorials.router)
 api_router.include_router(messages.router)
+
+# Coach / admin dashboard — role-guarded inside the package.
+api_router.include_router(admin.router)

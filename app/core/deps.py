@@ -73,3 +73,21 @@ async def get_optional_user(
 
 
 OptionalUser = Annotated[User | None, Depends(get_optional_user)]
+
+
+async def get_current_admin(user: CurrentUser) -> User:
+    """Strictly `admin`. Used for the destructive corners of the dashboard —
+    deleting accounts, changing someone's role, removing a pricing plan.
+
+    A `coach` can run the day-to-day: read records, write programmes, reply to
+    messages. Only an `admin` can change who has access to what.
+    """
+    if user.role is not UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="That action needs an admin account.",
+        )
+    return user
+
+
+CurrentAdmin = Annotated[User, Depends(get_current_admin)]
