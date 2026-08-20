@@ -122,3 +122,37 @@ class VideoProvider(StrEnum):
     YOUTUBE = "youtube"
     VIMEO = "vimeo"
     DIRECT = "direct"
+
+class SubscriptionStatus(StrEnum):
+    """Mirrors Stripe's subscription statuses.
+
+    Kept as Stripe's own vocabulary rather than a simplified one, so a webhook
+    can be written straight to the column without a lossy translation step in
+    between — the place such bugs like to hide.
+    """
+
+    INCOMPLETE = "incomplete"
+    INCOMPLETE_EXPIRED = "incomplete_expired"
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    UNPAID = "unpaid"
+    PAUSED = "paused"
+
+
+# The statuses that actually entitle someone to their coaching tier.
+# `past_due` is deliberately included: a failed card should not lock a paying
+# client out of their programme mid-week while Stripe retries. Stripe moves the
+# subscription to `unpaid` or `canceled` when retries are exhausted, and that is
+# the point where access stops.
+ENTITLING_STATUSES = frozenset(
+    {SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE}
+)
+
+
+class PaymentStatus(StrEnum):
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REFUNDED = "refunded"

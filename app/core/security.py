@@ -96,3 +96,49 @@ def hash_token(token: str) -> str:
 
 def generate_secret(length: int = 48) -> str:
     return secrets.token_urlsafe(length)
+
+
+# --- Signed media URLs --------------------------------------------------------
+#
+# Private images cannot be fetched with a bearer token: a browser <img> tag
+# sends no Authorization header, and the access token lives in memory rather
+# than a cookie by design. Every check-in photo therefore returned 401 and
+# rendered as a broken image.
+#
+# The fix is a short-lived signature in the URL itself. The link works in an
+# <img>, is useless once it expires, is bound to one photo and one viewer, and
+# needs no server-side state to verify.
+
+MEDIA_AUDIENCE = "media"
+
+
+def sign_media_url(resource_id: uuid.UUID, viewer_id: uuid.UUID, ttl_seconds: int) -> str:
+    """A token granting one viewer temporary read access to one file."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(viewer_id),
+        "res": str(resource_id),
+        "typ": MEDIA_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(seconds=ttl_seconds),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+def verify_media_token(token: str, resource_id: uuid.UUID) -> uuid.UUID | None:
+    """Return the viewer this token was minted for, or None if it is not valid.
+
+    Binding the signature to the resource id matters: without it, a token for
+    one photo would open every photo the same viewer could reach.
+    """
+    try:
+        claims = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+
+    if claims.get("typ") != MEDIA_AUDIENCE or claims.get("res") != str(resource_id):
+        return None
+    try:
+        return uuid.UUID(claims["sub"])
+    except (KeyError, ValueError):
+        return None

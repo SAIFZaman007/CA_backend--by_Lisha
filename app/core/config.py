@@ -65,11 +65,33 @@ class Settings(BaseSettings):
     SMTP_STARTTLS: bool = True
 
     # --- Uploads ------------------------------------------------------------
+    # --- Stripe -------------------------------------------------------------
+    # Leave blank in development: `stripe_gateway.is_configured()` returns
+    # False and the app boots normally, it just refuses to open a checkout.
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_CURRENCY: str = "usd"
+
+    # --- Private media ------------------------------------------------------
+    # A browser <img> tag cannot send an Authorization header, so private
+    # images are addressed with a short-lived signed URL instead. Long enough
+    # to load a gallery, short enough that a copied link is useless by the time
+    # it is pasted anywhere.
+    MEDIA_URL_TTL_SECONDS: int = 900
+
+    MAX_VIDEO_UPLOAD_MB: int = 512
+    ALLOWED_VIDEO_TYPES: Annotated[list[str], NoDecode] = [
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+    ]
+
     UPLOAD_DIR: str = "/app/uploads"
     MAX_UPLOAD_MB: int = 8
     ALLOWED_IMAGE_TYPES: Annotated[list[str], NoDecode] = ["image/jpeg", "image/png", "image/webp"]
 
-    @field_validator("ALLOWED_IMAGE_TYPES", mode="before")
+    @field_validator("ALLOWED_IMAGE_TYPES", "ALLOWED_VIDEO_TYPES", mode="before")
     @classmethod
     def _split_types(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):

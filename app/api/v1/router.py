@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     admin,
     auth,
+    billing,
     calculators,
     dashboard,
     exercises,
@@ -27,6 +28,7 @@ api_router.include_router(calculators.router)
 # Account
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
+api_router.include_router(billing.router)
 
 # Client portal
 api_router.include_router(dashboard.router)

@@ -6,7 +6,7 @@ stored hashed, so they can be revoked server-side and cannot be read by script.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
@@ -45,6 +45,24 @@ REFRESH_COOKIE = "coachauto_refresh"
 # Scoped so the cookie is only ever sent to the refresh and logout routes.
 COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
 
+# How long a just-rotated refresh token keeps working.
+#
+# Rotation is the right default: each refresh burns the old token, so a stolen
+# one has a short life. But it makes concurrent refreshes fatal — whichever
+# request loses the race presents an already-revoked token, and a strict reader
+# treats that as theft and signs the person out.
+#
+# That race is not hypothetical. React StrictMode double-invokes effects in
+# development, so every page load fired two refreshes and the second one killed
+# the session. Duplicated tabs, restored browser sessions and retried requests
+# do the same thing in production.
+#
+# So: a token revoked within this window, whose replacement is still live, is a
+# benign double-fire and is answered from the replacement. Presented later than
+# this, or with no live replacement, it is treated as reuse and the whole
+# session family is revoked.
+ROTATION_GRACE = timedelta(seconds=30)
+
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
@@ -65,17 +83,29 @@ def _clear_refresh_cookie(response: Response) -> None:
     )
 
 
-async def _issue_session(db: DbSession, user: User, request: Request, response: Response) -> TokenResponse:
+async def _issue_session(
+    db: DbSession,
+    user: User,
+    request: Request,
+    response: Response,
+    *,
+    rotated_from: RefreshSession | None = None,
+) -> TokenResponse:
     refresh_token, expires_at = create_refresh_token(user.id)
-    db.add(
-        RefreshSession(
-            user_id=user.id,
-            token_hash=hash_token(refresh_token),
-            expires_at=expires_at,
-            user_agent=(request.headers.get("user-agent") or "")[:300] or None,
-            ip_address=request.client.host if request.client else None,
-        )
+    session = RefreshSession(
+        user_id=user.id,
+        token_hash=hash_token(refresh_token),
+        expires_at=expires_at,
+        user_agent=(request.headers.get("user-agent") or "")[:300] or None,
+        ip_address=request.client.host if request.client else None,
     )
+    db.add(session)
+    await db.flush()
+
+    # Link the chain, so a replayed predecessor can be resolved to this row.
+    if rotated_from is not None:
+        rotated_from.replaced_by_id = session.id
+
     user.last_login_at = datetime.now(UTC)
     await db.flush()
 
@@ -84,6 +114,28 @@ async def _issue_session(db: DbSession, user: User, request: Request, response: 
         access_token=create_access_token(user.id, user.role.value),
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
+
+
+async def _revoke_family(db: DbSession, session: RefreshSession) -> None:
+    """Kill every session downstream of a reused token.
+
+    Reuse outside the grace window means someone holds a copy they should not.
+    We cannot tell the thief from the victim, so both are signed out and the
+    person reauthenticates.
+    """
+    now = datetime.now(UTC)
+    seen: set[uuid.UUID] = set()
+    current: RefreshSession | None = session
+
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        if current.revoked_at is None:
+            current.revoked_at = now
+        current = (
+            await db.get(RefreshSession, current.replaced_by_id)
+            if current.replaced_by_id
+            else None
+        )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -162,7 +214,7 @@ async def refresh(request: Request, response: Response, db: DbSession) -> TokenR
     ).scalar_one_or_none()
 
     now = datetime.now(UTC)
-    if session is None or session.revoked_at is not None or session.expires_at <= now:
+    if session is None or session.expires_at <= now:
         _clear_refresh_cookie(response)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
 
@@ -171,9 +223,41 @@ async def refresh(request: Request, response: Response, db: DbSession) -> TokenR
         _clear_refresh_cookie(response)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
 
+    if session.revoked_at is not None:
+        # Already rotated: either a harmless double-fire, or a replayed token.
+        replacement = (
+            await db.get(RefreshSession, session.replaced_by_id)
+            if session.replaced_by_id
+            else None
+        )
+        within_grace = now - session.revoked_at <= ROTATION_GRACE
+        replacement_live = (
+            replacement is not None
+            and replacement.revoked_at is None
+            and replacement.expires_at > now
+        )
+
+        if within_grace and replacement_live:
+            # The winner of the race already holds a good token. Hand back a
+            # matching access token rather than starting a third session, and
+            # leave the cookie alone — it already carries the replacement.
+            log.info("auth.refresh_raced", user_id=str(user.id))
+            return TokenResponse(
+                access_token=create_access_token(user.id, user.role.value),
+                expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            )
+
+        log.warning("auth.refresh_reuse", user_id=str(user.id), session_id=str(session.id))
+        await _revoke_family(db, session)
+        _clear_refresh_cookie(response)
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="Your session was ended for security. Please sign in again.",
+        )
+
     # Rotate: the old token dies the moment a new one is issued.
     session.revoked_at = now
-    return await _issue_session(db, user, request, response)
+    return await _issue_session(db, user, request, response, rotated_from=session)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

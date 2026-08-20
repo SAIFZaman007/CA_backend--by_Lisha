@@ -7,7 +7,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Response, Uploa
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 
-from app.core.deps import CurrentUser, DbSession
+from app.core.config import settings
+from app.core.deps import CurrentUser, DbSession, OptionalUser
+from app.core.security import sign_media_url, verify_media_token
 from app.models.enums import PhotoPose
 from app.models.tracking import BodyMeasurement, ProgressPhoto, WeightLog
 from app.schemas.tracking import (
@@ -123,8 +125,14 @@ async def log_measurements(
 # authenticated endpoint below, and only to the client who owns them.
 
 
-def _photo_url(photo: ProgressPhoto) -> str:
-    return f"/api/v1/progress/photos/{photo.id}/file"
+def _photo_url(photo: ProgressPhoto, viewer_id: uuid.UUID) -> str:
+    """A URL an <img> tag can actually load.
+
+    The endpoint below accepts either a bearer token or this signature, so the
+    same route serves both a scripted fetch and a plain image tag.
+    """
+    token = sign_media_url(photo.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
+    return f"/api/v1/progress/photos/{photo.id}/file?token={token}"
 
 
 @router.get("/photos", response_model=list[ProgressPhotoOut])
@@ -140,7 +148,7 @@ async def list_photos(user: CurrentUser, db: DbSession) -> list[ProgressPhotoOut
             id=p.id,
             log_date=p.log_date,
             pose=p.pose,
-            url=_photo_url(p),
+            url=_photo_url(p, user.id),
             note=p.note,
             shared_with_coach=p.shared_with_coach,
         )
@@ -177,18 +185,35 @@ async def upload_photo(
         id=photo.id,
         log_date=photo.log_date,
         pose=photo.pose,
-        url=_photo_url(photo),
+        url=_photo_url(photo, user.id),
         note=photo.note,
         shared_with_coach=photo.shared_with_coach,
     )
 
 
 @router.get("/photos/{photo_id}/file")
-async def get_photo_file(photo_id: uuid.UUID, user: CurrentUser, db: DbSession) -> Response:
+async def get_photo_file(
+    photo_id: uuid.UUID,
+    db: DbSession,
+    user: OptionalUser = None,
+    token: str | None = Query(None),
+) -> Response:
+    """Serve one private photo.
+
+    Authorised either by a bearer token (a scripted fetch) or by a signed
+    `token` query parameter (an <img> tag, which cannot set headers). Whichever
+    path is used, the resolved viewer must own the photo.
+    """
+    viewer_id = user.id if user else (verify_media_token(token, photo_id) if token else None)
+    if viewer_id is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="This photo link has expired. Reload the page."
+        )
+
     photo = (
         await db.execute(
             select(ProgressPhoto).where(
-                ProgressPhoto.id == photo_id, ProgressPhoto.client_id == user.id
+                ProgressPhoto.id == photo_id, ProgressPhoto.client_id == viewer_id
             )
         )
     ).scalar_one_or_none()

@@ -22,9 +22,15 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 async def _coach(db: DbSession) -> User:
+    # The business runs on a single coach who is also the super admin, so that
+    # account's role is ADMIN. Matching only COACH found nobody and every client
+    # thread failed — this looks for either, oldest first.
     coach = (
         await db.execute(
-            select(User).where(User.role == UserRole.COACH).order_by(User.created_at).limit(1)
+            select(User)
+            .where(User.role.in_((UserRole.COACH, UserRole.ADMIN)), User.is_active.is_(True))
+            .order_by(User.role == UserRole.COACH, User.created_at)
+            .limit(1)
         )
     ).scalar_one_or_none()
     if coach is None:

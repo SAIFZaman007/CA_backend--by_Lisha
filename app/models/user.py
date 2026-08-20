@@ -59,8 +59,11 @@ class ClientProfile(UUIDMixin, TimestampMixin, Base):
     )
 
     # Coaching assignment
-    level: Mapped[TrainingLevel] = mapped_column(
-        Enum(TrainingLevel, name="training_level"), default=TrainingLevel.LEVEL_1, nullable=False
+    # No level until a plan has actually been paid for. A fresh sign-up is a
+    # real account with a real profile, but it is entitled to no coaching tier
+    # until Stripe confirms a payment, so this stays NULL.
+    level: Mapped[TrainingLevel | None] = mapped_column(
+        Enum(TrainingLevel, name="training_level"), default=None, nullable=True
     )
     phase: Mapped[str | None] = mapped_column(String(60), default="Cut Phase")
     program_start_date: Mapped[date | None] = mapped_column(Date)
@@ -97,3 +100,12 @@ class RefreshSession(UUIDMixin, TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user_agent: Mapped[str | None] = mapped_column(String(300))
     ip_address: Mapped[str | None] = mapped_column(String(64))
+
+    # The session issued when this one was rotated out. Two things need it:
+    # a benign double-refresh (React StrictMode, a retried request, a duplicated
+    # tab) can be answered from the replacement instead of being treated as a
+    # breach; and genuine token theft can be traced along the chain so the whole
+    # family is revoked at once.
+    replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("refresh_sessions.id", ondelete="SET NULL")
+    )

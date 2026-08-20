@@ -1,6 +1,7 @@
 """Import every model here so Alembic autogenerate and SQLAlchemy see them all."""
 
 from app.core.database import Base
+from app.models.billing import Payment, Subscription, WebhookEvent
 from app.models.catalog import Exercise, Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
 from app.models.enums import (
@@ -15,6 +16,7 @@ from app.models.enums import (
     PhotoPose,
     SessionStatus,
     Sex,
+    SubscriptionStatus,
     TrainingLevel,
     TutorialCategory,
     UnitSystem,
@@ -64,7 +66,11 @@ __all__ = [
     "Sex",
     "SleepLog",
     "Testimonial",
+    "Payment",
+    "Subscription",
+    "SubscriptionStatus",
     "TrainingLevel",
+    "WebhookEvent",
     "TutorialCategory",
     "UnitSystem",
     "User",
