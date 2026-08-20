@@ -83,7 +83,7 @@ class Settings(BaseSettings):
 
     # --- Seeding ------------------------------------------------------------
     SEED_ON_STARTUP: bool = False
-    COACH_EMAIL: str = "coachauto2026@gmail.com"
+    COACH_EMAIL: str = "lisha.chessen@coach-auto.org"
     COACH_PASSWORD: str | None = None  # required only when SEED_ON_STARTUP is true
 
     @property

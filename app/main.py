@@ -114,12 +114,27 @@ async def request_context(request: Request, call_next):
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     response.headers["X-Request-ID"] = request_id
 
-    # The API serves JSON only, so it can afford a very strict policy.
+    # Common security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    
+    # --- CSP Modification Start ---
+    docs_paths = {"/docs", "/redoc", "/openapi.json"}
+    if request.url.path in docs_paths:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+            "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+            "img-src 'self' https://fastapi.tiangolo.com data:; "
+            "connect-src 'self' https://cdn.jsdelivr.net http://127.0.0.1:8000 http://localhost:8000; "
+            "frame-ancestors 'none';"
+        )
+    else:
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    # --- CSP Modification End ---
+
     if settings.is_production:
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains; preload"
