@@ -35,19 +35,28 @@ async def lifespan(app: FastAPI):
     log.info("startup", environment=settings.ENVIRONMENT)
 
     if settings.SEED_ON_STARTUP:
-        if not settings.COACH_PASSWORD:
-            log.error("seed.skipped_no_password")
-        else:
-            from app.services.seed import run_seed
+        # No password guard here any more — `run_seed` owns that decision
+        # itself now (see app/services/seed.py), so the CLI path gets the
+        # same protection this used to give only to startup.
+        from app.services.seed import run_seed
 
-            async with SessionLocal() as db:
-                await run_seed(db, settings.COACH_PASSWORD, settings.COACH_PASSWORD)
+        async with SessionLocal() as db:
+            await run_seed(db)
 
     yield
 
     await engine.dispose()
     log.info("shutdown")
 
+
+# Interactive docs stay off in production by default: publishing the full
+# route and schema map on the open internet is not something to do by
+# accident. `DEBUG=true` is the explicit, single-flag way to turn it back on
+# — e.g. temporarily, to reference the schema while wiring up a new client.
+# Docs do not expose data or secrets, only the *shape* of the API (routes,
+# parameter names, payload structure), but that is still more than a stranger
+# needs to see. Turn DEBUG back off once you are done with it.
+DOCS_ENABLED = settings.DEBUG or not settings.is_production
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -57,10 +66,9 @@ app = FastAPI(
         "sleep and cardio logging for Autonomy Health and Fitness."
     ),
     lifespan=lifespan,
-    # Interactive docs are a development convenience, not a production surface.
-    docs_url=None if settings.is_production else "/docs",
-    redoc_url=None if settings.is_production else "/redoc",
-    openapi_url=None if settings.is_production else "/openapi.json",
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 # --- Middleware ---------------------------------------------------------------

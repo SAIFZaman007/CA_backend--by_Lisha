@@ -8,15 +8,35 @@ What it creates:
   * the three coaching tiers (Level 1, 2 and 3) with their public copy
   * the exercise library and the published testimonials
   * ONE staff account — the coach, who is also the super admin
-  * a handful of client accounts covering the states worth testing:
-    a brand-new sign-up with no plan, and subscribed clients on each tier
+  * outside production only: a handful of demo client accounts covering the
+    states worth testing — a brand-new sign-up with no plan, and subscribed
+    clients on each tier
 
-A note on levels. A client's level now comes from a paid subscription, not from
-a column somebody set by hand. The seeded clients therefore get a real
+Two things this file got wrong before, both now fixed:
+
+1. It never committed. Every step called `db.flush()`, which pushes SQL to the
+   database and makes it visible *within the current transaction* — enough to
+   make later existence checks and log lines behave correctly, and enough to
+   look completely successful. But `flush` is not `commit`, and the session
+   this runs under is a raw `SessionLocal()`, not the `get_db()` FastAPI
+   dependency that commits automatically on a clean request. Without an
+   explicit commit, closing the session at the end of the script rolled the
+   whole transaction back — the coach, the demo clients, all of it. The
+   terminal said "seed.coach_created"; the database never actually got a row.
+
+2. The coach's credentials were hardcoded here instead of read from
+   `settings.COACH_EMAIL` / `settings.COACH_PASSWORD` — i.e. from the
+   environment, which is where a real production credential belongs, not in a
+   file that ends up in source control. Whatever was typed at the CLI's old
+   "Coach password" prompt was silently discarded either way; that prompt is
+   gone now, because it was ignored.
+
+A note on levels. A client's level comes from a paid subscription, not from a
+column somebody set by hand. The seeded clients therefore get a real
 `Subscription` row apiece; the profile level is derived from it through the
 same `entitlements` code the webhook uses, so seeded data and production data
-travel identical paths. The brand-new sign-up has no subscription and no level,
-which is exactly what the portal should treat as "choose a plan".
+travel identical paths. The brand-new sign-up has no subscription and no
+level, which is exactly what the portal should treat as "choose a plan".
 """
 
 import uuid
@@ -26,6 +46,7 @@ from slugify import slugify
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
 from app.models.billing import Subscription
@@ -47,15 +68,15 @@ from app.services import entitlements
 
 log = get_logger("seed")
 
-# --- The one staff account ----------------------------------------------------
-# One person runs this business. They coach and they administer, so the account
-# is ADMIN: it satisfies both `CurrentCoach` and `CurrentAdmin`, which is what
-# lets the same login edit a training block and delete a pricing tier.
-COACH_EMAIL = "lisha.chessen@coach-auto.org"
-COACH_PASSWORD = "c0@ch__!23"
+# The legal business name never appears in the product. Everything public
+# says Coach Auto. The account's own login email comes from settings.
+COACH_DISPLAY_NAME = "Coach Auto"
 
-# The legal name never appears in the product. Everything public says Coach Auto.
-COACH_DISPLAY_NAME = "Lisha Chessen"
+# Used only outside production, and only when `settings.COACH_PASSWORD` is
+# unset there too — so a laptop clone of this repo has a working coach login
+# on the first `seed` run without anyone needing to write a .env first. This
+# value is never used in production; see `_resolve_coach_password` below.
+DEV_FALLBACK_COACH_PASSWORD = "DevCoach!2026"
 
 PROGRAMS = [
     {
@@ -186,10 +207,10 @@ TESTIMONIALS = [
      "training days, and my lifts finally started moving again.", "-3 in waist"),
 ]
 
-
-# --- Client accounts ----------------------------------------------------------
-# Deliberately varied, so every state the portal has to render exists in a fresh
-# database: no plan at all, and one client on each tier.
+# --- Demo client accounts -------------------------------------------------------
+# Deliberately varied, so every state the portal has to render exists in a
+# fresh database: no plan at all, and one client on each tier. Seeded outside
+# production by default — see `_should_seed_demo_clients` for the override.
 CLIENTS = [
     {
         "email": "sandra.thompson@example.com",
@@ -259,7 +280,11 @@ async def _exists(db: AsyncSession, model, **filters) -> bool:
 
 
 async def seed_catalog(db: AsyncSession) -> None:
-    """The three tiers, the exercise library and the testimonials."""
+    """The three tiers, the exercise library and the testimonials.
+
+    Real business content, not test data — always seeded, in every
+    environment, including production.
+    """
     for index, data in enumerate(PROGRAMS):
         if await _exists(db, Program, slug=data["slug"]):
             continue
@@ -301,24 +326,55 @@ async def seed_catalog(db: AsyncSession) -> None:
     log.info("seed.catalog_ready")
 
 
-async def seed_coach(db: AsyncSession) -> User:
-    """The single coach-and-admin account."""
-    coach = (
-        await db.execute(select(User).where(User.email == COACH_EMAIL))
-    ).scalar_one_or_none()
+def _resolve_coach_password() -> str | None:
+    """The password to hash for a *newly created* coach account.
+
+    Never invents a real credential in production. If `COACH_PASSWORD` is not
+    set there, this returns `None` and the caller skips creating the account
+    entirely — a missing coach is a loud, obvious problem to fix by setting
+    the environment variable; a coach account quietly created with a made-up
+    password is a security incident waiting to be discovered.
+    """
+    if settings.COACH_PASSWORD:
+        return settings.COACH_PASSWORD
+    if settings.is_production:
+        return None
+    log.warning("seed.coach_using_dev_fallback_password", email=settings.COACH_EMAIL)
+    return DEV_FALLBACK_COACH_PASSWORD
+
+
+async def seed_coach(db: AsyncSession) -> User | None:
+    """The single coach-and-admin account.
+
+    Credentials come from `settings.COACH_EMAIL` / `settings.COACH_PASSWORD` —
+    the environment — never from a constant in this file. On an existing
+    account, only the role is self-healed here; the password is left alone on
+    purpose, so a routine reseed can never silently undo a credential the
+    coach rotated since. To deliberately set or reset the password, use
+    `python -m app.cli create-coach`.
+    """
+    email = settings.COACH_EMAIL.strip().lower()
+
+    coach = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
 
     if coach is not None:
-        # Repair an account seeded before the roles were merged, otherwise the
-        # coach silently loses the admin half of the dashboard.
         if coach.role is not UserRole.ADMIN:
             coach.role = UserRole.ADMIN
-            await db.flush()
-            log.info("seed.coach_promoted", email=COACH_EMAIL)
+            log.info("seed.coach_promoted", email=email)
         return coach
 
+    password = _resolve_coach_password()
+    if password is None:
+        log.error(
+            "seed.coach_skipped_no_password",
+            email=email,
+            hint="Set COACH_PASSWORD, or run: python -m app.cli create-coach",
+        )
+        return None
+
     coach = User(
-        email=COACH_EMAIL,
-        hashed_password=hash_password(COACH_PASSWORD),
+        email=email,
+        hashed_password=hash_password(password),
         full_name=COACH_DISPLAY_NAME,
         display_name=COACH_DISPLAY_NAME,
         role=UserRole.ADMIN,
@@ -327,13 +383,17 @@ async def seed_coach(db: AsyncSession) -> User:
     )
     db.add(coach)
     await db.flush()
-    log.info("seed.coach_created", email=COACH_EMAIL)
+    log.info("seed.coach_created", email=email)
     return coach
 
 
-async def seed_clients(db: AsyncSession, coach: User) -> None:
-    """Client accounts, their subscriptions, and a starting conversation."""
+async def seed_clients(db: AsyncSession, coach: User) -> int:
+    """Demo client accounts, their subscriptions, and a starting conversation.
+
+    Returns how many were newly created, for the summary line in `run_seed`.
+    """
     today = date.today()
+    created = 0
 
     for spec in CLIENTS:
         if await _exists(db, User, email=spec["email"]):
@@ -432,13 +492,48 @@ async def seed_clients(db: AsyncSession, coach: User) -> None:
         await db.flush()
 
         log.info("seed.client_created", email=spec["email"], tier=spec["tier"])
+        created += 1
+
+    return created
 
 
-async def run_seed(db: AsyncSession, *_legacy, **_legacy_kwargs) -> None:
-    """Seed everything. Extra arguments are accepted and ignored so older
-    callers that passed passwords in still work."""
+def _should_seed_demo_clients() -> bool:
+    """Whether to create the four demo/test client accounts.
+
+    Defaults to "yes everywhere except production" — a live customer database
+    is not the place for `sandra.thompson@example.com` to show up uninvited.
+    `SEED_DEMO_CLIENTS` overrides the default explicitly in either direction,
+    for a staging environment that is technically `ENVIRONMENT=production`
+    but should still get sample data, or the reverse.
+    """
+    if settings.SEED_DEMO_CLIENTS is not None:
+        return settings.SEED_DEMO_CLIENTS
+    return not settings.is_production
+
+
+async def run_seed(db: AsyncSession) -> None:
+    """Seed everything, and commit it.
+
+    That commit is the fix: every step before this used to only `flush()`,
+    which is visible within the transaction but is not durable. Closing the
+    session without an explicit commit rolled the entire seed back — silently,
+    since flush makes it look like it worked right up until the process exits.
+    """
     await seed_catalog(db)
     coach = await seed_coach(db)
-    await seed_clients(db, coach)
-    await db.flush()
-    log.info("seed.complete", coach=COACH_EMAIL, clients=len(CLIENTS))
+
+    demo_clients_created = 0
+    seed_demo = _should_seed_demo_clients()
+    if coach is not None and seed_demo:
+        demo_clients_created = await seed_clients(db, coach)
+    elif not seed_demo:
+        log.info("seed.demo_clients_skipped", reason="not enabled for this environment")
+
+    await db.commit()
+
+    log.info(
+        "seed.complete",
+        environment=settings.ENVIRONMENT,
+        coach=settings.COACH_EMAIL if coach else "SKIPPED — see seed.coach_skipped_no_password",
+        demo_clients_created=demo_clients_created,
+    )

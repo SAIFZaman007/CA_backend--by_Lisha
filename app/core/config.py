@@ -106,7 +106,18 @@ class Settings(BaseSettings):
     # --- Seeding ------------------------------------------------------------
     SEED_ON_STARTUP: bool = False
     COACH_EMAIL: str = "lisha.chessen@coach-auto.org"
-    COACH_PASSWORD: str | None = None  # required only when SEED_ON_STARTUP is true
+    # The one real credential seeding can create. Read by app/services/seed.py
+    # — never hardcode this anywhere else. Required to seed the coach account
+    # in production; outside production a dev-only fallback is used instead
+    # if this is left blank, so a fresh clone still has a working login.
+    COACH_PASSWORD: str | None = None
+
+    # None = seed demo/test client accounts everywhere except production.
+    # Set explicitly to override in either direction — e.g. `false` on a
+    # staging box that is technically ENVIRONMENT=production but should stay
+    # free of sample data, or `true` if you deliberately want demo clients on
+    # a production-flagged environment.
+    SEED_DEMO_CLIENTS: bool | None = None
 
     @property
     def is_production(self) -> bool:
