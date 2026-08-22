@@ -851,8 +851,7 @@ async def _seed_conversation(db: AsyncSession, client: User, coach: User, spec: 
             message.read_at = created  # the coach's own messages carry no unread state
         db.add(message)
 
-    time_offset = timedelta(seconds=float(exchange[-1][1]))
-    thread.last_message_at = now - time_offset
+    thread.last_message_at = now - exchange[-1][2]
     await db.flush()
 
 
