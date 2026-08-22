@@ -296,7 +296,11 @@ class DashboardTrend(BaseModel):
 
 class DashboardOut(BaseModel):
     greeting_name: str
-    level: TrainingLevel
+    # None until a plan has been paid for. A client can sign in, complete their
+    # intake and look around before they buy anything, and the dashboard has to
+    # render for them — so this is optional rather than defaulted to LEVEL_1,
+    # which would silently show unpaid clients a tier they do not have.
+    level: TrainingLevel | None = None
     phase: str | None
     program_week: int
     program_total_weeks: int

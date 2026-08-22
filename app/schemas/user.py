@@ -87,6 +87,7 @@ class ClientProfileOut(BaseModel):
     goal: Goal
     activity_level: ActivityLevel
     unit_system: UnitSystem
+    # None until a subscription grants one — see DashboardOut for the reasoning.
     level: TrainingLevel | None = None
     phase: str | None = None
     program_start_date: date | None = None
