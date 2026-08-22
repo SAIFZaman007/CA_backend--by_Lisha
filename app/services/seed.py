@@ -75,14 +75,7 @@ from app.services import entitlements
 
 log = get_logger("seed")
 
-# The legal business name never appears in the product. Everything public
-# says Coach Auto. The account's own login email comes from settings.
-COACH_DISPLAY_NAME = "Coach Auto"
-
-# Used only outside production, and only when `settings.COACH_PASSWORD` is
-# unset there too — so a laptop clone of this repo has a working coach login
-# on the first `seed` run without anyone needing to write a .env first. Never
-# used in production; see `_resolve_coach_password` below.
+COACH_DISPLAY_NAME = "Lisha Chessen"
 DEV_FALLBACK_COACH_PASSWORD = "DevCoach!2026"
 
 PROGRAMS = [
@@ -215,9 +208,6 @@ TESTIMONIALS = [
 ]
 
 # --- Demo client accounts -------------------------------------------------------
-# One per tier, plus a brand-new unsubscribed sign-up. Every subscribed client
-# gets macro targets set here, so their meal plan and dashboard have real
-# numbers instead of blanks.
 CLIENTS = [
     {
         "email": "sandra.thompson@example.com",
@@ -274,10 +264,6 @@ CLIENTS = [
         "fat_target_g": 65,
     },
     {
-        # The important one. Signed up, never paid: no subscription, no level,
-        # and the portal should be showing them the plans rather than a
-        # programme. Deliberately left with none of the data below — this is
-        # the one state that's supposed to look empty.
         "email": "new.signup@example.com",
         "password": "Client!2345",
         "full_name": "Jordan Ellis",
@@ -298,10 +284,6 @@ CLIENTS = [
 ]
 
 # --- Training templates ----------------------------------------------------
-# Three day templates, cycled to fill however many days a client's tier
-# trains — Level 1 gets A/B/C, Level 2 gets A/B/C/D (D repeats A's content
-# under its own label), Level 3 gets A through E.
-# (name, sets, rep range, rest seconds, nominal reps for a logged set)
 WORKOUT_DAY_TEMPLATES = [
     {
         "focus": "Lower Body",
@@ -339,10 +321,6 @@ WORKOUT_DAY_TEMPLATES = [
 ]
 DAY_LETTERS = ["A", "B", "C", "D", "E", "F", "G"]
 
-# Nominal working weight by equipment, in kilos, before per-level scaling.
-# Bodyweight and band movements are left at None — SetLog.weight_kg is
-# nullable, and "how much do you weigh" is not a number this file should
-# invent.
 _BASE_KG: dict[Equipment, float | None] = {
     Equipment.BARBELL: 50.0,
     Equipment.DUMBBELL: 16.0,
@@ -356,8 +334,6 @@ _BASE_KG: dict[Equipment, float | None] = {
 _LEVEL_SCALE = {TrainingLevel.LEVEL_1: 0.8, TrainingLevel.LEVEL_2: 1.0, TrainingLevel.LEVEL_3: 1.25}
 
 # --- Nutrition template ------------------------------------------------------
-# One day's meals, replicated across the week. Calories/macros are scaled per
-# client from their profile targets rather than hardcoded here.
 MEAL_TEMPLATE = [
     ("Breakfast", "🍳", time(7, 30),
      ["3 whole eggs", "1 cup rolled oats", "1 banana"]),
@@ -372,10 +348,6 @@ MEAL_TEMPLATE = [
 _MEAL_SHARE = (0.28, 0.32, 0.10, 0.30)
 
 # --- Pipeline demo data -------------------------------------------------------
-# Enquiries (Lead) and consultation bookings are different things covering
-# different moments — "someone asked a question" versus "a call is on the
-# calendar" — and having real, distinct sample rows in each is what makes
-# that difference visible on the two dashboard screens.
 LEADS = [
     {
         "full_name": "Alicia Moreno",
