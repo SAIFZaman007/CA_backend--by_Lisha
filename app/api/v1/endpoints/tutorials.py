@@ -6,13 +6,17 @@ Clients see published recordings only. Everything here is filtered by
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 
-from app.core.deps import CurrentUser, DbSession
+from app.core.config import settings
+from app.core.deps import CurrentUser, DbSession, OptionalUser
+from app.core.security import sign_media_url, verify_media_token
 from app.models.enums import Equipment, TutorialCategory
 from app.models.media import VideoTutorial
 from app.schemas.media import TutorialFilters, TutorialOut
+from app.services import storage
 
 router = APIRouter(prefix="/tutorials", tags=["tutorials"])
 
@@ -58,7 +62,8 @@ async def list_tutorials(
         .limit(limit)
         .offset(offset)
     )
-    return list((await db.execute(stmt)).scalars().all())
+    rows = list((await db.execute(stmt)).scalars().all())
+    return [attach_stream_url(row, user.id) for row in rows]
 
 
 @router.get("/filters", response_model=TutorialFilters)
@@ -114,7 +119,7 @@ async def get_tutorial(
     tutorial = await db.get(VideoTutorial, tutorial_id)
     if tutorial is None or not tutorial.is_published:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
-    return tutorial
+    return attach_stream_url(tutorial, user.id)
 
 
 @router.post("/{tutorial_id}/view", status_code=status.HTTP_204_NO_CONTENT)
@@ -132,4 +137,46 @@ async def record_view(tutorial_id: uuid.UUID, user: CurrentUser, db: DbSession) 
         VideoTutorial.__table__.update()
         .where(VideoTutorial.id == tutorial_id)
         .values(view_count=func.coalesce(VideoTutorial.view_count, 0) + 1)
+    )
+
+def attach_stream_url(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> VideoTutorial:
+    """Give an uploaded tutorial a playable address.
+
+    A hosted tutorial already has one. An uploaded one is a private file, so it
+    gets a short-lived signed URL that a <video> tag can load directly — the
+    same trick the check-in photos use, and for the same reason: media elements
+    cannot send an Authorization header.
+    """
+    if tutorial.file_key and not tutorial.video_url:
+        token = sign_media_url(tutorial.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
+        tutorial.video_url = f"/api/v1/tutorials/{tutorial.id}/stream?token={token}"
+    return tutorial
+
+
+@router.get("/{tutorial_id}/stream")
+async def stream_tutorial(
+    tutorial_id: uuid.UUID,
+    db: DbSession,
+    user: OptionalUser = None,
+    token: str | None = Query(None),
+) -> FileResponse:
+    """Serve an uploaded tutorial file.
+
+    Accepts a bearer token or a signed `token` parameter, so both a scripted
+    fetch and a plain <video src> work.
+    """
+    viewer_id = user.id if user else (verify_media_token(token, tutorial_id) if token else None)
+    if viewer_id is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="This video link has expired. Reload the page."
+        )
+
+    tutorial = await db.get(VideoTutorial, tutorial_id)
+    if tutorial is None or not tutorial.is_published or not tutorial.file_key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
+
+    return FileResponse(
+        storage.resolve_path(tutorial.file_key),
+        media_type="video/mp4",
+        headers={"Cache-Control": "private, max-age=900", "Accept-Ranges": "bytes"},
     )

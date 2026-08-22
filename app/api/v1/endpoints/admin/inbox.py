@@ -31,6 +31,33 @@ PREVIEW_CHARS = 120
 # --- Threads ------------------------------------------------------------------
 
 
+@router.get("/unread-count")
+async def unread_count(coach: CurrentCoach, db: DbSession) -> dict[str, int]:
+    """How many client messages are waiting on a reply.
+
+    Its own tiny endpoint so the sidebar badge can poll every few seconds
+    without dragging the whole overview payload — counts and dashboards want
+    very different refresh rates.
+    """
+    total = (
+        await db.execute(
+            select(func.count(Message.id))
+            .join(MessageThread, MessageThread.id == Message.thread_id)
+            .where(Message.read_at.is_(None), Message.sender_id == MessageThread.client_id)
+        )
+    ).scalar_one()
+
+    threads = (
+        await db.execute(
+            select(func.count(func.distinct(Message.thread_id)))
+            .join(MessageThread, MessageThread.id == Message.thread_id)
+            .where(Message.read_at.is_(None), Message.sender_id == MessageThread.client_id)
+        )
+    ).scalar_one()
+
+    return {"unread": total, "threads": threads}
+
+
 @router.get("/threads", response_model=list[ThreadSummary])
 async def list_threads(
     coach: CurrentCoach,

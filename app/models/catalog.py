@@ -29,6 +29,12 @@ class Program(UUIDMixin, TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     features: Mapped[list[str]] = mapped_column(ARRAY(String(200)), default=list, nullable=False)
     best_for: Mapped[str | None] = mapped_column(String(200))
+
+    # The hero shot on the public level page. Either an uploaded file (stored
+    # key) or an external URL — the coach may do whichever is convenient, and
+    # `image_url` on the API resolves whichever is set.
+    image_key: Mapped[str | None] = mapped_column(String(300))
+    image_external_url: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_accepting_clients: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

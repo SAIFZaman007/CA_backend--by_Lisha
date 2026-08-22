@@ -87,7 +87,7 @@ class ClientProfileOut(BaseModel):
     goal: Goal
     activity_level: ActivityLevel
     unit_system: UnitSystem
-    level: TrainingLevel
+    level: TrainingLevel | None = None
     phase: str | None = None
     program_start_date: date | None = None
     program_week: int

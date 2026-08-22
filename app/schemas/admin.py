@@ -361,6 +361,7 @@ class ProgramIn(BaseModel):
     description: str = Field(min_length=2, max_length=6000)
     features: list[str] = Field(default_factory=list, max_length=20)
     best_for: str | None = Field(default=None, max_length=200)
+    image_external_url: str | None = Field(default=None, max_length=500)
     is_active: bool = True
     is_accepting_clients: bool = True
     sort_order: int = Field(default=0, ge=0, le=999)
@@ -377,6 +378,7 @@ class ProgramUpdate(BaseModel):
     description: str | None = Field(default=None, min_length=2, max_length=6000)
     features: list[str] | None = Field(default=None, max_length=20)
     best_for: str | None = Field(default=None, max_length=200)
+    image_external_url: str | None = Field(default=None, max_length=500)
     is_active: bool | None = None
     is_accepting_clients: bool | None = None
     sort_order: int | None = Field(default=None, ge=0, le=999)
@@ -397,6 +399,7 @@ class ProgramAdminOut(BaseModel):
     description: str
     features: list[str]
     best_for: str | None = None
+    image_url: str | None = None
     is_active: bool
     is_accepting_clients: bool
     sort_order: int

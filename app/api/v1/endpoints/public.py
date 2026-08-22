@@ -1,6 +1,9 @@
 """Everything the marketing site needs, without a login."""
 
+import uuid
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -11,6 +14,7 @@ from app.models.catalog import Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead
 from app.schemas.catalog import ProgramOut, TestimonialOut
 from app.schemas.tracking import BookingIn, BookingOut, LeadIn
+from app.services import storage
 from app.services.email import notify_coach_new_lead
 
 router = APIRouter(tags=["public"])
@@ -111,3 +115,21 @@ async def create_booking(
     db.add(booking)
     await db.flush()
     return booking
+
+
+@router.get("/programs/{program_id}/image")
+async def program_image(program_id: uuid.UUID, db: DbSession) -> FileResponse:
+    """A tier's hero image.
+
+    Public and unauthenticated on purpose — this is marketing artwork on the
+    pricing page, not client data — so it is cached hard at the edge.
+    """
+    program = await db.get(Program, program_id)
+    if program is None or not program.image_key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No image for that plan.")
+
+    return FileResponse(
+        storage.resolve_path(program.image_key),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

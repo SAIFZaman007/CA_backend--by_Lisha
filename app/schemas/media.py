@@ -53,7 +53,7 @@ class TutorialOut(BaseModel):
     description: str | None = None
     category: TutorialCategory
     provider: VideoProvider
-    video_url: str
+    video_url: str | None = None
     thumbnail_url: str | None = None
     duration_seconds: int | None = None
     target_muscle: str | None = None
@@ -76,7 +76,11 @@ class TutorialAdminOut(TutorialOut):
 
 class TutorialCreate(BaseModel):
     title: str = Field(min_length=2, max_length=160)
-    video_url: HttpUrl
+    # Exactly one source: a hosting link, or the key returned by the upload
+    # endpoint. Enforced below rather than left to the database, so the coach
+    # gets a sentence instead of an integrity error.
+    video_url: HttpUrl | None = None
+    file_key: str | None = Field(default=None, max_length=300)
     summary: str | None = Field(default=None, max_length=300)
     description: str | None = Field(default=None, max_length=6000)
     category: TutorialCategory = TutorialCategory.FORM_TECHNIQUE
@@ -102,7 +106,15 @@ class TutorialCreate(BaseModel):
         return seen
 
     @model_validator(mode="after")
+    def _one_source(self) -> "TutorialCreate":
+        if not self.video_url and not self.file_key:
+            raise ValueError("Add a video link, or upload a video file.")
+        return self
+
+    @model_validator(mode="after")
     def _fill_thumbnail(self) -> "TutorialCreate":
+        if self.video_url is None:
+            return self
         if self.thumbnail_url is None:
             guessed = default_thumbnail(str(self.video_url))
             if guessed:
@@ -113,6 +125,7 @@ class TutorialCreate(BaseModel):
 class TutorialUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=2, max_length=160)
     video_url: HttpUrl | None = None
+    file_key: str | None = Field(default=None, max_length=300)
     summary: str | None = Field(default=None, max_length=300)
     description: str | None = Field(default=None, max_length=6000)
     category: TutorialCategory | None = None

@@ -36,7 +36,12 @@ class VideoTutorial(UUIDMixin, TimestampMixin, Base):
     provider: Mapped[VideoProvider] = mapped_column(
         Enum(VideoProvider, name="video_provider"), default=VideoProvider.YOUTUBE, nullable=False
     )
-    video_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Either a hosting link OR an uploaded file — never neither. `video_url` is
+    # nullable because an uploaded tutorial has no external address; the schema
+    # enforces that exactly one of the two is supplied.
+    video_url: Mapped[str | None] = mapped_column(String(500))
+    file_key: Mapped[str | None] = mapped_column(String(300))
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
     thumbnail_url: Mapped[str | None] = mapped_column(String(500))
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
 
