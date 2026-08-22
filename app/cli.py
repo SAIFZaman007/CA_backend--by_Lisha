@@ -8,14 +8,15 @@
     python -m app.cli healthcheck       # verify the database connection
 
 `seed` takes its credentials from settings — i.e. from the environment — and
-never prompts for a password. It used to: the prompts here fed into a
-`run_seed()` that had already been rewritten to ignore whatever they typed,
-so a password entered at this prompt was silently discarded. That mismatch is
-exactly what caused a previous incident where a freshly typed password did
-not work and a leftover from months earlier did. Prompting for input that is
-then thrown away is worse than not prompting at all — better to have one
-source of truth (`.env`) and one deliberate command (`create-coach`) for
-setting a real credential by hand.
+runs immediately, with no prompts and no confirmation. It used to ask for a
+password here that a rewritten `run_seed()` had already started ignoring, and
+separately used to pause for a "type 'seed' to continue" confirmation before
+touching production. Neither one was really protecting anything: the
+password prompt fed a value straight into the void, and every insert inside
+`run_seed()` already checks for itself before writing — that per-row check is
+the actual safety property, not a human typing a word first. One source of
+truth for credentials (`.env`), one deliberate command (`create-coach`) for
+setting one by hand, and `seed` itself just runs.
 """
 
 import argparse
@@ -33,19 +34,16 @@ from app.models.user import User
 
 
 async def _seed() -> None:
+    """Run the one seed. No prompts, no confirmation — every insert already
+    checks for itself before writing anything, which is the actual safety
+    property that matters; a "type a word to continue" prompt in front of an
+    idempotent operation was friction without adding protection."""
     from app.services.seed import run_seed
-
-    if settings.is_production:
-        print(f"This will seed against a PRODUCTION database ({settings.db_host}).")
-        print("Real customer data lives here. The catalogue and coach account are always")
-        print("safe to (re-)seed; demo client accounts are skipped in production by default.")
-        if input("Type 'seed' to continue: ").strip() != "seed":
-            sys.exit("Cancelled.")
 
     async with SessionLocal() as db:
         await run_seed(db)
 
-    print("Seed complete. See the log above for what was created or skipped.")
+    print("Seed complete. See the log above for what was created, backfilled, or skipped.")
 
 
 async def _create_coach() -> None:

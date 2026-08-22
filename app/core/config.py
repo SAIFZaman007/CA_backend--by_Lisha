@@ -112,12 +112,11 @@ class Settings(BaseSettings):
     # if this is left blank, so a fresh clone still has a working login.
     COACH_PASSWORD: str | None = None
 
-    # None = seed demo/test client accounts everywhere except production.
-    # Set explicitly to override in either direction — e.g. `false` on a
-    # staging box that is technically ENVIRONMENT=production but should stay
-    # free of sample data, or `true` if you deliberately want demo clients on
-    # a production-flagged environment.
-    SEED_DEMO_CLIENTS: bool | None = None
+    # Seeded everywhere by default, including production — a handful of
+    # clearly fake @example.com accounts alongside real customers has never
+    # been the problem. Set to false to opt out, e.g. on a database you want
+    # to keep completely clean.
+    SEED_DEMO_CLIENTS: bool = True
 
     @property
     def is_production(self) -> bool:

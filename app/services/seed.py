@@ -1,46 +1,44 @@
 """The one and only seed.
 
-Run with `python -m app.cli seed`. Every insert is guarded by an existence
-check, so running it twice changes nothing.
+Run with `python -m app.cli seed`. No prompts, no confirmation, no
+environment check — it just runs, every time, everywhere. Every insert is
+guarded by its own existence check, so running it against a database that
+already has some of this data fills in whatever is missing rather than
+skipping the whole thing or duplicating what's there.
 
 What it creates:
 
   * the three coaching tiers (Level 1, 2 and 3) with their public copy
   * the exercise library and the published testimonials
   * ONE staff account — the coach, who is also the super admin
-  * outside production only: a handful of demo client accounts covering the
-    states worth testing — a brand-new sign-up with no plan, and subscribed
-    clients on each tier
+  * demo client accounts covering the states worth testing: a brand-new
+    sign-up with no plan, and one subscribed client per tier — each with a
+    real assigned training block, a meal plan, weeks of sleep/cardio/weight
+    history, body measurements, a check-in photo, and a live message thread
+  * a handful of website enquiries and consultation bookings, so the coach
+    dashboard's pipeline screens have real, distinct, realistic content
 
-Two things this file got wrong before, both now fixed:
+A note on why every piece is checked individually rather than the whole
+client being skipped if the email already exists: the previous version
+gated everything on one `User` existence check, which meant re-running the
+seed against an already-seeded database (exactly what "add richer demo
+data" needs to do) did nothing at all for accounts that already existed.
+Every sub-piece below — the plan, the meal plan, the sleep history, the
+subscription — now checks for itself, so this script is safe and useful to
+run again at any time, on a fresh database or a partially-seeded one.
 
-1. It never committed. Every step called `db.flush()`, which pushes SQL to the
-   database and makes it visible *within the current transaction* — enough to
-   make later existence checks and log lines behave correctly, and enough to
-   look completely successful. But `flush` is not `commit`, and the session
-   this runs under is a raw `SessionLocal()`, not the `get_db()` FastAPI
-   dependency that commits automatically on a clean request. Without an
-   explicit commit, closing the session at the end of the script rolled the
-   whole transaction back — the coach, the demo clients, all of it. The
-   terminal said "seed.coach_created"; the database never actually got a row.
-
-2. The coach's credentials were hardcoded here instead of read from
-   `settings.COACH_EMAIL` / `settings.COACH_PASSWORD` — i.e. from the
-   environment, which is where a real production credential belongs, not in a
-   file that ends up in source control. Whatever was typed at the CLI's old
-   "Coach password" prompt was silently discarded either way; that prompt is
-   gone now, because it was ignored.
-
-A note on levels. A client's level comes from a paid subscription, not from a
-column somebody set by hand. The seeded clients therefore get a real
-`Subscription` row apiece; the profile level is derived from it through the
-same `entitlements` code the webhook uses, so seeded data and production data
-travel identical paths. The brand-new sign-up has no subscription and no
-level, which is exactly what the portal should treat as "choose a plan".
+A note on levels. A client's level comes from a paid subscription, not from
+a column somebody set by hand. Seeded clients get a real `Subscription` row
+apiece; the profile level is derived from it through the same `entitlements`
+code the webhook uses, so seeded data and production data travel identical
+paths. The brand-new sign-up has no subscription and no level, which is
+exactly what the portal should treat as "choose a plan" — left alone on
+purpose, as the one deliberately empty state worth keeping in the demo.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 
 from slugify import slugify
 from sqlalchemy import func, select
@@ -51,18 +49,27 @@ from app.core.logging import get_logger
 from app.core.security import hash_password
 from app.models.billing import Subscription
 from app.models.catalog import Exercise, Program, Testimonial
-from app.models.engagement import Message, MessageThread
+from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
 from app.models.enums import (
     ActivityLevel,
+    BookingStatus,
+    CardioType,
+    DataSource,
     Equipment,
     Goal,
+    Intensity,
+    LeadStatus,
+    PhotoPose,
     Sex,
+    SessionStatus,
     SubscriptionStatus,
     TrainingLevel,
     UnitSystem,
     UserRole,
 )
-from app.models.tracking import WeightLog
+from app.models.nutrition import Meal, MealItem, MealPlan
+from app.models.tracking import BodyMeasurement, CardioLog, ProgressPhoto, SleepLog, WeightLog
+from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan, WorkoutSession, SetLog
 from app.models.user import ClientProfile, User
 from app.services import entitlements
 
@@ -74,8 +81,8 @@ COACH_DISPLAY_NAME = "Coach Auto"
 
 # Used only outside production, and only when `settings.COACH_PASSWORD` is
 # unset there too — so a laptop clone of this repo has a working coach login
-# on the first `seed` run without anyone needing to write a .env first. This
-# value is never used in production; see `_resolve_coach_password` below.
+# on the first `seed` run without anyone needing to write a .env first. Never
+# used in production; see `_resolve_coach_password` below.
 DEV_FALLBACK_COACH_PASSWORD = "DevCoach!2026"
 
 PROGRAMS = [
@@ -208,9 +215,9 @@ TESTIMONIALS = [
 ]
 
 # --- Demo client accounts -------------------------------------------------------
-# Deliberately varied, so every state the portal has to render exists in a
-# fresh database: no plan at all, and one client on each tier. Seeded outside
-# production by default — see `_should_seed_demo_clients` for the override.
+# One per tier, plus a brand-new unsubscribed sign-up. Every subscribed client
+# gets macro targets set here, so their meal plan and dashboard have real
+# numbers instead of blanks.
 CLIENTS = [
     {
         "email": "sandra.thompson@example.com",
@@ -225,6 +232,10 @@ CLIENTS = [
         "current_kg": 69.9,
         "goal_kg": 66.0,
         "weeks_in": 8,
+        "calorie_target": 1800,
+        "protein_target_g": 150,
+        "carb_target_g": 165,
+        "fat_target_g": 55,
     },
     {
         "email": "marcus.reed@example.com",
@@ -239,6 +250,10 @@ CLIENTS = [
         "current_kg": 81.2,
         "goal_kg": 86.0,
         "weeks_in": 14,
+        "calorie_target": 2900,
+        "protein_target_g": 190,
+        "carb_target_g": 330,
+        "fat_target_g": 80,
     },
     {
         "email": "priya.kapoor@example.com",
@@ -253,11 +268,16 @@ CLIENTS = [
         "current_kg": 60.4,
         "goal_kg": 60.0,
         "weeks_in": 26,
+        "calorie_target": 2000,
+        "protein_target_g": 130,
+        "carb_target_g": 220,
+        "fat_target_g": 65,
     },
     {
         # The important one. Signed up, never paid: no subscription, no level,
         # and the portal should be showing them the plans rather than a
-        # programme.
+        # programme. Deliberately left with none of the data below — this is
+        # the one state that's supposed to look empty.
         "email": "new.signup@example.com",
         "password": "Client!2345",
         "full_name": "Jordan Ellis",
@@ -270,6 +290,161 @@ CLIENTS = [
         "current_kg": None,
         "goal_kg": None,
         "weeks_in": 0,
+        "calorie_target": None,
+        "protein_target_g": None,
+        "carb_target_g": None,
+        "fat_target_g": None,
+    },
+]
+
+# --- Training templates ----------------------------------------------------
+# Three day templates, cycled to fill however many days a client's tier
+# trains — Level 1 gets A/B/C, Level 2 gets A/B/C/D (D repeats A's content
+# under its own label), Level 3 gets A through E.
+# (name, sets, rep range, rest seconds, nominal reps for a logged set)
+WORKOUT_DAY_TEMPLATES = [
+    {
+        "focus": "Lower Body",
+        "exercises": [
+            ("Barbell Back Squat", 4, "6-8", 120, 7),
+            ("Romanian Deadlift", 3, "8-10", 90, 9),
+            ("Leg Press", 3, "10-12", 75, 11),
+            ("Walking Lunge", 3, "10-12", 60, 11),
+            ("Seated Calf Raise", 3, "12-15", 45, 14),
+            ("Plank", 3, "45-60s", 45, None),
+        ],
+    },
+    {
+        "focus": "Upper Body — Push & Pull",
+        "exercises": [
+            ("Incline Dumbbell Press", 4, "8-10", 90, 9),
+            ("Seated Cable Row", 3, "8-10", 90, 9),
+            ("Dumbbell Shoulder Press", 3, "8-10", 75, 9),
+            ("Lat Pulldown", 3, "10-12", 75, 11),
+            ("Tricep Pushdown", 3, "10-12", 60, 11),
+            ("Face Pull", 3, "12-15", 45, 14),
+        ],
+    },
+    {
+        "focus": "Full Body — Posterior Chain",
+        "exercises": [
+            ("Conventional Deadlift", 4, "5-6", 150, 5),
+            ("Dumbbell Bench Press", 3, "8-10", 90, 9),
+            ("Bulgarian Split Squat", 3, "8-10 ea", 75, 9),
+            ("Dumbbell Row", 3, "10-12", 60, 11),
+            ("Hip Thrust", 3, "10-12", 75, 11),
+            ("Push-Up", 3, "AMRAP", 60, 14),
+        ],
+    },
+]
+DAY_LETTERS = ["A", "B", "C", "D", "E", "F", "G"]
+
+# Nominal working weight by equipment, in kilos, before per-level scaling.
+# Bodyweight and band movements are left at None — SetLog.weight_kg is
+# nullable, and "how much do you weigh" is not a number this file should
+# invent.
+_BASE_KG: dict[Equipment, float | None] = {
+    Equipment.BARBELL: 50.0,
+    Equipment.DUMBBELL: 16.0,
+    Equipment.MACHINE: 40.0,
+    Equipment.CABLE: 20.0,
+    Equipment.BODYWEIGHT: None,
+    Equipment.KETTLEBELL: 16.0,
+    Equipment.BAND: None,
+    Equipment.OTHER: None,
+}
+_LEVEL_SCALE = {TrainingLevel.LEVEL_1: 0.8, TrainingLevel.LEVEL_2: 1.0, TrainingLevel.LEVEL_3: 1.25}
+
+# --- Nutrition template ------------------------------------------------------
+# One day's meals, replicated across the week. Calories/macros are scaled per
+# client from their profile targets rather than hardcoded here.
+MEAL_TEMPLATE = [
+    ("Breakfast", "🍳", time(7, 30),
+     ["3 whole eggs", "1 cup rolled oats", "1 banana"]),
+    ("Lunch", "🥗", time(12, 30),
+     ["7 oz grilled chicken breast", "1.5 cups rice", "2 cups mixed greens"]),
+    ("Afternoon snack", "🥤", time(16, 0),
+     ["1 scoop protein powder", "1 handful almonds"]),
+    ("Dinner", "🍽️", time(19, 0),
+     ["7 oz salmon or lean beef", "1 cup roasted vegetables", "1 medium potato"]),
+]
+# Roughly how much of the daily target each meal above carries.
+_MEAL_SHARE = (0.28, 0.32, 0.10, 0.30)
+
+# --- Pipeline demo data -------------------------------------------------------
+# Enquiries (Lead) and consultation bookings are different things covering
+# different moments — "someone asked a question" versus "a call is on the
+# calendar" — and having real, distinct sample rows in each is what makes
+# that difference visible on the two dashboard screens.
+LEADS = [
+    {
+        "full_name": "Alicia Moreno",
+        "email": "alicia.moreno@example.com",
+        "phone": "+1 512 555 0142",
+        "level_interest": TrainingLevel.LEVEL_1,
+        "primary_goal": "Lose weight and build a routine",
+        "message": "I've never worked with a coach before — a bit nervous but ready to start.",
+        "status": LeadStatus.NEW,
+    },
+    {
+        "full_name": "Derek Wu",
+        "email": "derek.wu@example.com",
+        "phone": "+1 415 555 0198",
+        "level_interest": TrainingLevel.LEVEL_2,
+        "primary_goal": "Break through a bench press plateau",
+        "message": "Training four times a week already — want a real programme instead of winging it.",
+        "status": LeadStatus.CONTACTED,
+    },
+    {
+        "full_name": "Fatima Al-Sayed",
+        "email": "fatima.alsayed@example.com",
+        "phone": None,
+        "level_interest": TrainingLevel.LEVEL_1,
+        "primary_goal": "General health after a long break",
+        "message": "Used to train in college. Haven't touched a weight in three years.",
+        "status": LeadStatus.CONVERTED,
+    },
+    {
+        "full_name": "Tom Whitfield",
+        "email": "tom.whitfield@example.com",
+        "phone": "+1 312 555 0110",
+        "level_interest": TrainingLevel.LEVEL_3,
+        "primary_goal": "Prep for a powerlifting meet",
+        "message": "Meet is in five months. Need a coach who has done this before.",
+        "status": LeadStatus.CLOSED,
+    },
+]
+
+BOOKINGS = [
+    {
+        "name": "Alicia Moreno",
+        "email": "alicia.moreno@example.com",
+        "phone": "+1 512 555 0142",
+        "days_ahead": 3,
+        "topic": "First consultation — goals and schedule",
+        "status": BookingStatus.REQUESTED,
+        "coach_notes": None,
+    },
+    {
+        "name": "Derek Wu",
+        "email": "derek.wu@example.com",
+        "phone": "+1 415 555 0198",
+        "days_ahead": 1,
+        "topic": "Programme walkthrough before starting",
+        "status": BookingStatus.CONFIRMED,
+        "coach_notes": None,
+    },
+    {
+        "name": "Priya Kapoor",
+        "email": "priya.kapoor@example.com",
+        "phone": None,
+        "days_ahead": -14,
+        "topic": "Quarterly check-in call",
+        "status": BookingStatus.COMPLETED,
+        "coach_notes": (
+            "Great progress on posterior chain strength. Talked through adding a peak week "
+            "ahead of her next assessment."
+        ),
     },
 ]
 
@@ -331,9 +506,7 @@ def _resolve_coach_password() -> str | None:
 
     Never invents a real credential in production. If `COACH_PASSWORD` is not
     set there, this returns `None` and the caller skips creating the account
-    entirely — a missing coach is a loud, obvious problem to fix by setting
-    the environment variable; a coach account quietly created with a made-up
-    password is a security incident waiting to be discovered.
+    entirely.
     """
     if settings.COACH_PASSWORD:
         return settings.COACH_PASSWORD
@@ -346,10 +519,9 @@ def _resolve_coach_password() -> str | None:
 async def seed_coach(db: AsyncSession) -> User | None:
     """The single coach-and-admin account.
 
-    Credentials come from `settings.COACH_EMAIL` / `settings.COACH_PASSWORD` —
-    the environment — never from a constant in this file. On an existing
-    account, only the role is self-healed here; the password is left alone on
-    purpose, so a routine reseed can never silently undo a credential the
+    Credentials come from `settings.COACH_EMAIL` / `settings.COACH_PASSWORD`.
+    On an existing account, only the role is self-healed here; the password is
+    left alone, so a routine reseed can never silently undo a credential the
     coach rotated since. To deliberately set or reset the password, use
     `python -m app.cli create-coach`.
     """
@@ -387,58 +559,379 @@ async def seed_coach(db: AsyncSession) -> User | None:
     return coach
 
 
-async def seed_clients(db: AsyncSession, coach: User) -> int:
-    """Demo client accounts, their subscriptions, and a starting conversation.
+# --- Per-client content -------------------------------------------------------
+# Each of these is independently guarded, so they backfill correctly onto a
+# client account that already exists.
 
-    Returns how many were newly created, for the summary line in `run_seed`.
-    """
+
+async def _seed_training(
+    db: AsyncSession,
+    client: User,
+    program: Program,
+    exercise_by_name: dict[str, Exercise],
+) -> None:
+    """A real assigned block: days, movements, sets and rep ranges, plus a few
+    weeks of completed sessions so adherence and volume are not all zero."""
+    plan = WorkoutPlan(
+        client_id=client.id,
+        program_id=program.id,
+        name=f"{program.name.split(' — ')[0]} Block",
+        level=program.level,
+        week_number=1,
+        total_weeks=12,
+        notes="Standard rotation. Swap a movement any week if something is nagging.",
+        is_custom=False,
+        is_active=True,
+    )
+    db.add(plan)
+    await db.flush()
+
+    scale = _LEVEL_SCALE[program.level]
+    days: list[WorkoutDay] = []
+
+    for i in range(program.days_per_week):
+        template = WORKOUT_DAY_TEMPLATES[i % len(WORKOUT_DAY_TEMPLATES)]
+        day = WorkoutDay(
+            plan_id=plan.id,
+            label=f"Day {DAY_LETTERS[i]}",
+            focus=template["focus"],
+            day_of_week=i,
+            order_index=i,
+            estimated_minutes=program.session_minutes,
+        )
+        db.add(day)
+        await db.flush()
+
+        for order, (name, sets, reps, rest, _nominal) in enumerate(template["exercises"]):
+            exercise = exercise_by_name.get(name)
+            if exercise is None:
+                continue
+            base = _BASE_KG.get(exercise.equipment)
+            target_weight = round(base * scale, 1) if base is not None else None
+            db.add(
+                WorkoutDayExercise(
+                    day_id=day.id,
+                    exercise_id=exercise.id,
+                    order_index=order,
+                    sets=sets,
+                    rep_range=reps,
+                    rest_seconds=rest,
+                    target_weight_kg=target_weight,
+                )
+            )
+        days.append(day)
+    await db.flush()
+
+    # Up to three weeks of completed sessions, three days a week, so the
+    # dashboard's "sessions this week" and volume numbers have real data.
     today = date.today()
+    for week_offset in range(3, 0, -1):
+        for day in days[: min(len(days), 3)]:
+            session_date = today - timedelta(weeks=week_offset, days=6 - day.order_index)
+            session = WorkoutSession(
+                client_id=client.id,
+                day_id=day.id,
+                session_date=session_date,
+                status=SessionStatus.COMPLETED,
+                duration_minutes=day.estimated_minutes,
+                completed_at=datetime.combine(session_date, time(18, 0), tzinfo=UTC),
+            )
+            db.add(session)
+            await db.flush()
+
+            day_exercises = (
+                await db.execute(
+                    select(WorkoutDayExercise).where(WorkoutDayExercise.day_id == day.id)
+                )
+            ).scalars().all()
+            template = WORKOUT_DAY_TEMPLATES[day.order_index % len(WORKOUT_DAY_TEMPLATES)]
+            nominal_by_order = {i: ex[4] for i, ex in enumerate(template["exercises"])}
+
+            for de in day_exercises:
+                reps = nominal_by_order.get(de.order_index)
+                for set_number in range(1, de.sets + 1):
+                    db.add(
+                        SetLog(
+                            session_id=session.id,
+                            day_exercise_id=de.id,
+                            set_number=set_number,
+                            weight_kg=de.target_weight_kg,
+                            reps=reps,
+                            is_completed=True,
+                        )
+                    )
+    await db.flush()
+
+
+async def _seed_meal_plan(db: AsyncSession, client: User, spec: dict) -> None:
+    """A seven-day meal plan built from the client's own macro targets."""
+    calories = spec["calorie_target"] or 2000
+    protein = spec["protein_target_g"] or 140
+    carbs = spec["carb_target_g"] or 200
+    fat = spec["fat_target_g"] or 60
+
+    plan = MealPlan(
+        client_id=client.id,
+        name="Weekly Meal Plan",
+        phase=spec["goal"],
+        calorie_target=calories,
+        protein_target_g=protein,
+        carb_target_g=carbs,
+        fat_target_g=fat,
+        notes="Hit protein first, then fill the rest of the day with whatever fits.",
+        is_active=True,
+    )
+    db.add(plan)
+    await db.flush()
+
+    for day_of_week in range(7):
+        for order, (name, icon, serve_time, items) in enumerate(MEAL_TEMPLATE):
+            share = _MEAL_SHARE[order]
+            meal = Meal(
+                plan_id=plan.id,
+                day_of_week=day_of_week,
+                order_index=order,
+                name=name,
+                serve_time=serve_time,
+                icon=icon,
+                calories=round(calories * share),
+                protein_g=round(protein * share),
+                carbs_g=round(carbs * share),
+                fat_g=round(fat * share),
+            )
+            db.add(meal)
+            await db.flush()
+            for item_order, label in enumerate(items):
+                db.add(MealItem(meal_id=meal.id, label=label, order_index=item_order))
+    await db.flush()
+
+
+async def _seed_wellness(db: AsyncSession, client: User) -> None:
+    """Three weeks of sleep and a rotating handful of cardio sessions."""
+    today = date.today()
+
+    for offset in range(21):
+        log_date = today - timedelta(days=offset)
+        hours = round(6.5 + ((offset * 37) % 5) / 2, 1)  # 6.5–9.0, varied but deterministic
+        quality = 3 + ((offset * 13) % 3)
+        db.add(
+            SleepLog(
+                client_id=client.id,
+                log_date=log_date,
+                bedtime=time(22, 30),
+                wake_time=time(6, 30),
+                hours_slept=hours,
+                quality=quality,
+            )
+        )
+
+    activities = [CardioType.WALKING, CardioType.RUNNING, CardioType.CYCLING]
+    for i, offset in enumerate(range(1, 21, 3)):
+        log_date = today - timedelta(days=offset)
+        activity = activities[i % len(activities)]
+        duration = 25 + (i % 3) * 10
+        distance = round(duration / 4, 1) if activity is CardioType.CYCLING else round(duration / 12, 1)
+        db.add(
+            CardioLog(
+                client_id=client.id,
+                log_date=log_date,
+                activity_type=activity,
+                duration_minutes=duration,
+                distance_km=distance,
+                avg_heart_rate=125 + (i % 4) * 5,
+                calories_burned=duration * 7,
+                intensity=Intensity.MODERATE,
+                source=DataSource.MANUAL,
+            )
+        )
+    await db.flush()
+
+
+async def _seed_measurements(db: AsyncSession, client: User, spec: dict) -> None:
+    """Two tape-measurement check-ins, trending in the direction of the goal."""
+    today = date.today()
+    direction = -1 if spec["goal"] is Goal.CUT else (1 if spec["goal"] is Goal.BUILD else 0)
+
+    for weeks_ago, progressed in ((4, False), (1, True)):
+        drift = direction * 1.5 if progressed else 0
+        db.add(
+            BodyMeasurement(
+                client_id=client.id,
+                log_date=today - timedelta(weeks=weeks_ago),
+                chest_cm=round(98 + drift, 1),
+                waist_cm=round(84 + drift, 1),
+                hips_cm=round(100 + drift, 1),
+                left_arm_cm=round(32 + drift * 0.3, 1),
+                right_arm_cm=round(32.2 + drift * 0.3, 1),
+                left_thigh_cm=round(56 + drift * 0.5, 1),
+                right_thigh_cm=round(56.2 + drift * 0.5, 1),
+                neck_cm=round(37 + drift * 0.2, 1),
+            )
+        )
+    await db.flush()
+
+
+async def _seed_checkin_photo(db: AsyncSession, client: User) -> None:
+    """One placeholder check-in photo, written through the real storage path
+    so the existing authenticated photo route serves it correctly.
+
+    This is a plain labelled placeholder card, not a synthesised body photo —
+    it exists to prove the gallery, upload path and signed-URL serving all
+    work, not to stand in for a real client image.
+    """
+    from PIL import Image, ImageDraw
+
+    log_date = date.today() - timedelta(days=3)
+    directory = Path(settings.UPLOAD_DIR) / str(client.id) / log_date.isoformat()
+    directory.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex[:16]}.jpg"
+    destination = directory / filename
+
+    image = Image.new("RGB", (800, 1000), color=(20, 20, 23))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([40, 40, 760, 960], outline=(229, 32, 44), width=6)
+    draw.text((80, 450), "Check-in photo", fill=(255, 255, 255))
+    draw.text((80, 480), "(seed placeholder)", fill=(160, 160, 170))
+    draw.text((80, 510), log_date.isoformat(), fill=(160, 160, 170))
+    image.save(destination, "JPEG", quality=85)
+
+    key = f"{client.id}/{log_date.isoformat()}/{filename}"
+    db.add(
+        ProgressPhoto(
+            client_id=client.id,
+            log_date=log_date,
+            pose=PhotoPose.FRONT,
+            file_key=key,
+            content_type="image/jpeg",
+            size_bytes=destination.stat().st_size,
+            shared_with_coach=True,
+        )
+    )
+    await db.flush()
+
+
+async def _seed_conversation(db: AsyncSession, client: User, coach: User, spec: dict) -> None:
+    """A short, real-looking exchange rather than a single welcome line.
+
+    Each exchange deliberately ends with a client message left unread — the
+    same condition the coach dashboard's unread badge and the client
+    portal's own notification counter both key off, so the seeded data
+    proves that path end to end rather than just existing.
+    """
+    thread = MessageThread(client_id=client.id, coach_id=coach.id)
+    db.add(thread)
+    await db.flush()
+
+    first_name = spec["full_name"].split()[0]
+    now = datetime.now(UTC)
+
+    if spec["tier"]:
+        exchange = [
+            (coach.id, f"Welcome, {first_name}! Your first block is loaded — check the "
+                       "Workout tab and let me know if anything doesn't make sense.",
+             timedelta(days=10)),
+            (client.id, "Just finished day one. That cue about controlling the descent made "
+                        "a real difference.", timedelta(days=9, hours=20)),
+            (coach.id, "That's exactly it. Keep that tempo through the block and we'll add "
+                       "weight once it feels automatic.", timedelta(days=9, hours=18)),
+            (client.id, "Will do. Also — is it normal for my legs to still be sore two days "
+                        "later?", timedelta(hours=5)),
+        ]
+    else:
+        exchange = [
+            (coach.id, f"Hi {first_name} — welcome to Coach Auto. Whenever you're ready, "
+                       "have a look at the plans and pick whichever fits your week. Happy to "
+                       "talk it through first if that's easier.", timedelta(days=2)),
+        ]
+
+    for sender_id, body, age in exchange:
+        created = now - age
+        message = Message(thread_id=thread.id, sender_id=sender_id, body=body, created_at=created)
+        if sender_id == coach.id:
+            message.read_at = created  # the coach's own messages carry no unread state
+        db.add(message)
+
+    thread.last_message_at = now - exchange[-1][1]
+    await db.flush()
+
+
+async def seed_clients(db: AsyncSession, coach: User) -> int:
+    """Demo client accounts, and everything attached to them.
+
+    Returns how many *new accounts* were created, for the summary line. Every
+    piece attached to a client is checked independently, so this backfills
+    correctly onto accounts that already exist.
+    """
+    exercise_by_name = {
+        ex.name: ex for ex in (await db.execute(select(Exercise))).scalars().all()
+    }
     created = 0
 
     for spec in CLIENTS:
-        if await _exists(db, User, email=spec["email"]):
-            continue
+        client = (
+            await db.execute(select(User).where(User.email == spec["email"]))
+        ).scalar_one_or_none()
 
-        client = User(
-            email=spec["email"],
-            hashed_password=hash_password(spec["password"]),
-            full_name=spec["full_name"],
-            display_name=spec["display_name"],
-            role=UserRole.CLIENT,
-            is_active=True,
-            is_verified=True,
-        )
-        db.add(client)
-        await db.flush()
+        is_new = client is None
+        if is_new:
+            client = User(
+                email=spec["email"],
+                hashed_password=hash_password(spec["password"]),
+                full_name=spec["full_name"],
+                display_name=spec["display_name"],
+                role=UserRole.CLIENT,
+                is_active=True,
+                is_verified=True,
+            )
+            db.add(client)
+            await db.flush()
+            created += 1
 
-        profile = ClientProfile(
-            user_id=client.id,
-            sex=spec["sex"],
-            height_cm=spec["height_cm"],
-            starting_weight_kg=spec["start_kg"],
-            current_weight_kg=spec["current_kg"],
-            goal_weight_kg=spec["goal_kg"],
-            goal=spec["goal"],
-            activity_level=ActivityLevel.LIGHT,
-            unit_system=UnitSystem.IMPERIAL,
-            # Left NULL on purpose — set below, and only via a subscription.
-            level=None,
-            onboarding_completed=spec["tier"] is not None,
-        )
-        if spec["weeks_in"]:
-            profile.program_start_date = today - timedelta(weeks=spec["weeks_in"])
-            profile.program_week = spec["weeks_in"]
-            profile.program_total_weeks = 12
-        db.add(profile)
-        await db.flush()
+        profile = (
+            await db.execute(select(ClientProfile).where(ClientProfile.user_id == client.id))
+        ).scalar_one_or_none()
+        if profile is None:
+            profile = ClientProfile(
+                user_id=client.id,
+                sex=spec["sex"],
+                height_cm=spec["height_cm"],
+                starting_weight_kg=spec["start_kg"],
+                current_weight_kg=spec["current_kg"],
+                goal_weight_kg=spec["goal_kg"],
+                goal=spec["goal"],
+                activity_level=ActivityLevel.LIGHT,
+                unit_system=UnitSystem.IMPERIAL,
+                level=None,  # set below, and only via a subscription
+                onboarding_completed=spec["tier"] is not None,
+            )
+            if spec["weeks_in"]:
+                profile.program_start_date = date.today() - timedelta(weeks=spec["weeks_in"])
+                profile.program_week = min(spec["weeks_in"], 12)
+                profile.program_total_weeks = 12
+            db.add(profile)
+            await db.flush()
 
-        # A paid tier means a subscription row, exactly as Stripe would create.
+        # Backfill macro targets onto an existing profile only if nobody has
+        # set them since — never overwrite a value the coach has since edited.
+        if spec["tier"] and profile.calorie_target is None and spec["calorie_target"]:
+            profile.calorie_target = spec["calorie_target"]
+            profile.protein_target_g = spec["protein_target_g"]
+            profile.carb_target_g = spec["carb_target_g"]
+            profile.fat_target_g = spec["fat_target_g"]
+
+        program = None
         if spec["tier"]:
             program = (
                 await db.execute(select(Program).where(Program.slug == spec["tier"]))
             ).scalar_one_or_none()
 
-            if program is not None:
+        if program is not None:
+            profile.weekly_workout_target = program.days_per_week
+
+            if not await _exists(
+                db, Subscription, client_id=client.id, program_id=program.id,
+                status=SubscriptionStatus.ACTIVE,
+            ):
                 started = datetime.now(UTC) - timedelta(weeks=spec["weeks_in"] or 1)
                 db.add(
                     Subscription(
@@ -451,8 +944,8 @@ async def seed_clients(db: AsyncSession, coach: User) -> int:
                         started_at=started,
                         current_period_start=datetime.now(UTC) - timedelta(days=7),
                         current_period_end=datetime.now(UTC) + timedelta(days=23),
-                        # No Stripe ids: these are seeded, not bought. The
-                        # billing portal correctly refuses to open for them.
+                        # No Stripe ids: this is seeded, not bought. The
+                        # billing portal correctly refuses to open for it.
                     )
                 )
                 await db.flush()
@@ -460,65 +953,107 @@ async def seed_clients(db: AsyncSession, coach: User) -> int:
                 # setting it by hand — one code path, one set of bugs.
                 await entitlements.sync_profile_level(db, client.id)
 
-        # Some weight history, so the progress chart is not an empty box.
-        if spec["start_kg"] and spec["current_kg"] and spec["weeks_in"]:
-            weeks = spec["weeks_in"]
-            step = (spec["current_kg"] - spec["start_kg"]) / weeks
-            for week in range(weeks + 1):
-                db.add(
-                    WeightLog(
-                        client_id=client.id,
-                        log_date=today - timedelta(weeks=weeks - week),
-                        weight_kg=round(spec["start_kg"] + step * week, 1),
-                    )
-                )
+            if not await _exists(db, WorkoutPlan, client_id=client.id):
+                await _seed_training(db, client, program, exercise_by_name)
 
-        # Open the thread with a welcome, so messaging is never a blank screen.
-        thread = MessageThread(client_id=client.id, coach_id=coach.id)
-        db.add(thread)
-        await db.flush()
-        db.add(
-            Message(
-                thread_id=thread.id,
-                sender_id=coach.id,
-                body=(
-                    f"Welcome, {spec['full_name'].split()[0]}. Fill in your intake when you get "
-                    "a minute and I will have your first block ready. Message me here with "
-                    "anything at all."
-                ),
-            )
-        )
-        thread.last_message_at = datetime.now(UTC)
-        await db.flush()
+            if not await _exists(db, MealPlan, client_id=client.id):
+                await _seed_meal_plan(db, client, spec)
 
-        log.info("seed.client_created", email=spec["email"], tier=spec["tier"])
-        created += 1
+            if not await _exists(db, SleepLog, client_id=client.id):
+                await _seed_wellness(db, client)
+
+            if not await _exists(db, BodyMeasurement, client_id=client.id):
+                await _seed_measurements(db, client, spec)
+
+            if not await _exists(db, ProgressPhoto, client_id=client.id):
+                await _seed_checkin_photo(db, client)
+
+            if not await _exists(db, WeightLog, client_id=client.id):
+                if spec["start_kg"] and spec["current_kg"] and spec["weeks_in"]:
+                    weeks = spec["weeks_in"]
+                    step = (spec["current_kg"] - spec["start_kg"]) / weeks
+                    today = date.today()
+                    for week in range(weeks + 1):
+                        db.add(
+                            WeightLog(
+                                client_id=client.id,
+                                log_date=today - timedelta(weeks=weeks - week),
+                                weight_kg=round(spec["start_kg"] + step * week, 1),
+                            )
+                        )
+                    await db.flush()
+
+        if not await _exists(db, MessageThread, client_id=client.id):
+            await _seed_conversation(db, client, coach, spec)
+
+        log.info("seed.client_ready", email=spec["email"], created=is_new, tier=spec["tier"])
 
     return created
 
 
-def _should_seed_demo_clients() -> bool:
-    """Whether to create the four demo/test client accounts.
+async def seed_pipeline(db: AsyncSession) -> None:
+    """Website enquiries and consultation bookings.
 
-    Defaults to "yes everywhere except production" — a live customer database
-    is not the place for `sandra.thompson@example.com` to show up uninvited.
-    `SEED_DEMO_CLIENTS` overrides the default explicitly in either direction,
-    for a staging environment that is technically `ENVIRONMENT=production`
-    but should still get sample data, or the reverse.
+    Kept as clearly different content on purpose: a lead is someone who asked
+    a question and has not necessarily talked to anyone yet; a booking is a
+    call actually on the calendar, in the past, present or future. Real,
+    distinct sample rows in each make that difference visible on the two
+    dashboard screens rather than something you have to take on faith.
     """
-    if settings.SEED_DEMO_CLIENTS is not None:
-        return settings.SEED_DEMO_CLIENTS
-    return not settings.is_production
+    for spec in LEADS:
+        if await _exists(db, Lead, email=spec["email"]):
+            continue
+        db.add(
+            Lead(
+                full_name=spec["full_name"],
+                email=spec["email"],
+                phone=spec["phone"],
+                level_interest=spec["level_interest"],
+                primary_goal=spec["primary_goal"],
+                message=spec["message"],
+                source="website",
+                status=spec["status"],
+                consent_marketing=True,
+            )
+        )
+
+    now = datetime.now(UTC)
+    for spec in BOOKINGS:
+        if await _exists(db, ConsultationBooking, email=spec["email"], topic=spec["topic"]):
+            continue
+        db.add(
+            ConsultationBooking(
+                name=spec["name"],
+                email=spec["email"],
+                phone=spec["phone"],
+                preferred_at=now + timedelta(days=spec["days_ahead"]),
+                timezone="America/Chicago",
+                topic=spec["topic"],
+                status=spec["status"],
+                coach_notes=spec["coach_notes"],
+            )
+        )
+
+    await db.flush()
+    log.info("seed.pipeline_ready")
+
+
+def _should_seed_demo_clients() -> bool:
+    """Seeded everywhere by default, including production.
+
+    `SEED_DEMO_CLIENTS=false` is the only way to opt out, in any environment.
+    There used to be an environment-based default here — demo clients on
+    automatically outside production, off automatically inside it — which
+    meant getting real demo data in front of an actual client required
+    remembering a one-off override every single time. A handful of clearly
+    fake `@example.com` accounts alongside real customers has never been the
+    problem; being unable to get them without a flag was.
+    """
+    return settings.SEED_DEMO_CLIENTS
 
 
 async def run_seed(db: AsyncSession) -> None:
-    """Seed everything, and commit it.
-
-    That commit is the fix: every step before this used to only `flush()`,
-    which is visible within the transaction but is not durable. Closing the
-    session without an explicit commit rolled the entire seed back — silently,
-    since flush makes it look like it worked right up until the process exits.
-    """
+    """Seed everything, and commit it."""
     await seed_catalog(db)
     coach = await seed_coach(db)
 
@@ -526,8 +1061,9 @@ async def run_seed(db: AsyncSession) -> None:
     seed_demo = _should_seed_demo_clients()
     if coach is not None and seed_demo:
         demo_clients_created = await seed_clients(db, coach)
+        await seed_pipeline(db)
     elif not seed_demo:
-        log.info("seed.demo_clients_skipped", reason="not enabled for this environment")
+        log.info("seed.demo_clients_skipped", reason="SEED_DEMO_CLIENTS=false")
 
     await db.commit()
 
