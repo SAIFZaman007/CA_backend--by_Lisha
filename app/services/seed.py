@@ -55,7 +55,7 @@ COACH_EMAIL = "lisha.chessen@coach-auto.org"
 COACH_PASSWORD = "c0@ch__!23"
 
 # The legal name never appears in the product. Everything public says Coach Auto.
-COACH_DISPLAY_NAME = "Coach Auto"
+COACH_DISPLAY_NAME = "Lisha Chessen"
 
 PROGRAMS = [
     {
