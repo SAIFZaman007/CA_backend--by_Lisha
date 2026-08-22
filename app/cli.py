@@ -36,7 +36,7 @@ async def _seed() -> None:
     from app.services.seed import run_seed
 
     if settings.is_production:
-        print(f"This will seed against a PRODUCTION database ({settings.DATABASE_URL.host}).")
+        print(f"This will seed against a PRODUCTION database ({settings.db_host}).")
         print("Real customer data lives here. The catalogue and coach account are always")
         print("safe to (re-)seed; demo client accounts are skipped in production by default.")
         if input("Type 'seed' to continue: ").strip() != "seed":

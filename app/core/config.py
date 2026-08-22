@@ -124,6 +124,25 @@ class Settings(BaseSettings):
         return self.ENVIRONMENT == "production"
 
     @property
+    def db_host(self) -> str:
+        """The bare hostname of DATABASE_URL — safe to print in a log line or
+        a CLI confirmation prompt, unlike the DSN itself, which carries the
+        password in plaintext.
+
+        `PostgresDsn` is a `MultiHostUrl` in Pydantic v2 (Postgres connection
+        strings can legally name more than one host, for replica failover), so
+        it exposes `.hosts()` — a list — rather than a single `.host`
+        attribute. There is no `.host` on this type; reading it raises
+        `AttributeError`, which is exactly what took the CLI down here. This
+        reads the first entry from the list, which is the only host in the
+        overwhelming majority of setups, including this one.
+        """
+        hosts = self.DATABASE_URL.hosts()
+        if hosts and hosts[0].get("host"):
+            return hosts[0]["host"]
+        return "unknown-host"
+
+    @property
     def sqlalchemy_url(self) -> str:
         """Force the asyncpg driver regardless of how the URL was supplied."""
         url = str(self.DATABASE_URL)

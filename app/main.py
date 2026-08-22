@@ -1,4 +1,5 @@
-"""Coach Auto API — application entrypoint.
+"""
+Coach Auto API — application entrypoint.
 
 Autonomy Health and Fitness · online strength coaching platform.
 """
@@ -26,18 +27,13 @@ from app.core.rate_limit import limiter
 configure_logging()
 log = get_logger("api")
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fail fast and loudly if the database is unreachable at boot.
     async with engine.begin() as conn:
         await conn.execute(text("SELECT 1"))
     log.info("startup", environment=settings.ENVIRONMENT)
 
     if settings.SEED_ON_STARTUP:
-        # No password guard here any more — `run_seed` owns that decision
-        # itself now (see app/services/seed.py), so the CLI path gets the
-        # same protection this used to give only to startup.
         from app.services.seed import run_seed
 
         async with SessionLocal() as db:
@@ -48,14 +44,6 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
     log.info("shutdown")
 
-
-# Interactive docs stay off in production by default: publishing the full
-# route and schema map on the open internet is not something to do by
-# accident. `DEBUG=true` is the explicit, single-flag way to turn it back on
-# — e.g. temporarily, to reference the schema while wiring up a new client.
-# Docs do not expose data or secrets, only the *shape* of the API (routes,
-# parameter names, payload structure), but that is still more than a stranger
-# needs to see. Turn DEBUG back off once you are done with it.
 DOCS_ENABLED = settings.DEBUG or not settings.is_production
 
 app = FastAPI(
@@ -72,7 +60,6 @@ app = FastAPI(
 )
 
 # --- Middleware ---------------------------------------------------------------
-# Order matters: the last one added is the outermost.
 
 app.state.limiter = limiter
 
@@ -81,7 +68,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,  # required for the refresh cookie
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
     expose_headers=["X-Request-ID"],
@@ -100,7 +87,6 @@ if settings.is_production:
             "ca-backend.maktechgroups.com"
         ]
     )
-
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -159,9 +145,7 @@ async def request_context(request: Request, call_next):
     structlog.contextvars.clear_contextvars()
     return response
 
-
 # --- Error handling -----------------------------------------------------------
-
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
@@ -169,7 +153,6 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRe
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"detail": "That is a lot of requests in a short time. Wait a minute and retry."},
     )
-
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -185,17 +168,13 @@ async def validation_handler(request: Request, exc: RequestValidationError) -> J
         content={"detail": "Check the highlighted fields and try again.", "fields": fields},
     )
 
-
 # --- Routes -------------------------------------------------------------------
-
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
 
 @app.get("/health", tags=["ops"], include_in_schema=False)
 async def health() -> dict[str, str]:
     """Liveness probe. Deliberately does not touch the database."""
     return {"status": "ok", "service": "coach-auto-api"}
-
 
 @app.get("/health/ready", tags=["ops"], include_in_schema=False)
 async def readiness() -> dict[str, str]:
