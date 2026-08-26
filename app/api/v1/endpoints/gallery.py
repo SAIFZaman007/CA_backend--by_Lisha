@@ -1,101 +1,77 @@
-"""Gallery management — the coach's side of the Hall of the Coach.
+"""The public gallery — "Hall of the Coach".
 
-Add, edit, reorder, publish and delete, all from the dashboard. Upload is its
-own endpoint for the same reason tutorial video upload is: the bytes go up
-first and independently, so a slip in the title field never costs a re-upload.
+Unauthenticated on purpose. Everything here is marketing imagery the client
+wants found: transformations, coaching shots, competition photos,
+certifications. It is served with long cache headers and listed in the sitemap,
+which is exactly the opposite of how `progress.py` treats a check-in photo, and
+the two must never be confused. Nothing in this module touches client data.
 """
 
 import uuid
+from collections import defaultdict
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
-from slugify import slugify
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import FileResponse
+from sqlalchemy import func, select
 
-from app.api.v1.endpoints.gallery import serialise
-from app.core.deps import CurrentCoach, DbSession
-from app.core.logging import get_logger
-from app.models.enums import GalleryCategory
+from app.core.config import settings
+from app.core.deps import DbSession
+from app.models.enums import GALLERY_CATEGORY_LABELS, GalleryCategory
 from app.models.gallery import GalleryImage
 from app.schemas.gallery import (
-    GalleryImageAdminOut,
-    GalleryImageCreate,
-    GalleryImageUpdate,
-    GalleryReorder,
-    GalleryUploadOut,
+    GalleryCategoryOption,
+    GalleryImageOut,
+    GallerySection,
+    category_options,
 )
 from app.services import storage
 
-router = APIRouter()
-log = get_logger("admin.gallery")
+router = APIRouter(prefix="/gallery", tags=["gallery"])
 
 
-async def _unique_slug(db: DbSession, title: str, *, exclude: uuid.UUID | None = None) -> str:
-    """A URL-safe slug that is not already taken.
+def image_url(image: GalleryImage) -> str:
+    """The public, cacheable address of one gallery image.
 
-    Two photos legitimately share a title — "Week 12" happens every quarter —
-    so a collision is normal operation rather than an error worth surfacing.
-    Suffixing quietly is the right behaviour; failing the save is not.
+    A path rather than an absolute URL, so the same response works behind the
+    nginx proxy in production and Vite's dev proxy locally. The frontend and
+    the sitemap builder are the two places that need it absolute, and both
+    already know the canonical origin.
     """
-    base = slugify(title)[:160] or "gallery-image"
-    candidate = base
-    suffix = 2
-    while True:
-        stmt = select(GalleryImage.id).where(GalleryImage.slug == candidate)
-        if exclude:
-            stmt = stmt.where(GalleryImage.id != exclude)
-        if (await db.execute(stmt)).scalar_one_or_none() is None:
-            return candidate
-        candidate = f"{base}-{suffix}"[:180]
-        suffix += 1
+    return f"{settings.API_V1_PREFIX}/gallery/{image.id}/file"
 
 
-def _admin_out(image: GalleryImage) -> GalleryImageAdminOut:
-    base = serialise(image)
-    return GalleryImageAdminOut(
-        **base.model_dump(),
-        is_published=image.is_published,
-        sort_order=image.sort_order,
-        file_size_bytes=image.file_size_bytes,
-        created_at=image.created_at,
-        updated_at=image.updated_at,
+def serialise(image: GalleryImage) -> GalleryImageOut:
+    return GalleryImageOut(
+        id=image.id,
+        slug=image.slug,
+        title=image.title,
+        caption=image.caption,
+        alt_text=image.alt_text,
+        category=image.category,
+        category_label=GALLERY_CATEGORY_LABELS.get(image.category, image.category.value),
+        tags=image.tags,
+        image_url=image_url(image),
+        width=image.width,
+        height=image.height,
+        taken_on=image.taken_on,
+        credit=image.credit,
+        is_featured=image.is_featured,
     )
 
 
-@router.post("/gallery/upload", response_model=GalleryUploadOut, status_code=status.HTTP_201_CREATED)
-async def upload_gallery_image(
-    coach: CurrentCoach,
-    file: UploadFile = File(...),
-) -> GalleryUploadOut:
-    """Store the bytes and hand back the key the create form submits.
-
-    Dimensions come back with it so the create form can show a real preview,
-    and so `width`/`height` land on the row — the public grid needs them to
-    reserve layout space before the images arrive, or every photo that loads
-    shoves the page around.
-    """
-    key, size, width, height = await storage.save_gallery_image(file)
-    log.info("gallery.uploaded", bytes=size, width=width, height=height)
-    return GalleryUploadOut(
-        image_key=key,
-        width=width,
-        height=height,
-        file_size_bytes=size,
-    )
-
-
-@router.get("/gallery", response_model=list[GalleryImageAdminOut])
-async def list_gallery(
-    coach: CurrentCoach,
+@router.get("", response_model=list[GalleryImageOut])
+async def list_images(
     db: DbSession,
     category: GalleryCategory | None = None,
-    include_unpublished: bool = Query(True),
-    limit: int = Query(200, ge=1, le=500),
+    featured_only: bool = Query(False),
+    limit: int = Query(120, ge=1, le=500),
     offset: int = Query(0, ge=0),
-) -> list[GalleryImageAdminOut]:
+) -> list[GalleryImageOut]:
     stmt = (
         select(GalleryImage)
+        .where(GalleryImage.is_published.is_(True))
         .order_by(
-            GalleryImage.category,
+            GalleryImage.is_featured.desc(),
             GalleryImage.sort_order,
             GalleryImage.created_at.desc(),
         )
@@ -104,116 +80,109 @@ async def list_gallery(
     )
     if category:
         stmt = stmt.where(GalleryImage.category == category)
-    if not include_unpublished:
-        stmt = stmt.where(GalleryImage.is_published.is_(True))
+    if featured_only:
+        stmt = stmt.where(GalleryImage.is_featured.is_(True))
 
     rows = (await db.execute(stmt)).scalars().all()
-    return [_admin_out(image) for image in rows]
+    return [serialise(image) for image in rows]
 
 
-@router.post("/gallery", response_model=GalleryImageAdminOut, status_code=status.HTTP_201_CREATED)
-async def create_gallery_image(
-    payload: GalleryImageCreate, coach: CurrentCoach, db: DbSession
-) -> GalleryImageAdminOut:
-    # Confirm the uploaded file is really there before writing a row that
-    # points at it. Otherwise a stale key from an abandoned tab produces a
-    # gallery entry that renders as a broken image on the public page.
-    storage.resolve_path(payload.image_key)
+@router.get("/sections", response_model=list[GallerySection])
+async def list_sections(
+    db: DbSession,
+    per_category: int = Query(60, ge=1, le=200),
+) -> list[GallerySection]:
+    """Every published image, already grouped by category.
 
-    data = payload.model_dump()
-    image = GalleryImage(
-        slug=await _unique_slug(db, payload.title),
-        created_by_id=coach.id,
-        **data,
-    )
-    db.add(image)
-    await db.flush()
-
-    log.info("gallery.created", image_id=str(image.id), category=image.category.value)
-    return _admin_out(image)
-
-
-@router.patch("/gallery/{image_id}", response_model=GalleryImageAdminOut)
-async def update_gallery_image(
-    image_id: uuid.UUID, payload: GalleryImageUpdate, coach: CurrentCoach, db: DbSession
-) -> GalleryImageAdminOut:
-    image = await db.get(GalleryImage, image_id)
-    if image is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
-
-    updates = payload.model_dump(exclude_unset=True)
-
-    # Replacing the file: verify the new one, then delete the old one only
-    # after the row has been repointed. Deleting first would leave a gap where
-    # the page has no image at all if the write below fails.
-    old_key: str | None = None
-    if "image_key" in updates and updates["image_key"] and updates["image_key"] != image.image_key:
-        storage.resolve_path(updates["image_key"])
-        old_key = image.image_key
-
-    if "title" in updates and updates["title"]:
-        image.slug = await _unique_slug(db, updates["title"], exclude=image.id)
-
-    for field, value in updates.items():
-        setattr(image, field, value)
-    await db.flush()
-
-    if old_key:
-        storage.delete_file(old_key)
-
-    log.info("gallery.updated", image_id=str(image_id))
-    return _admin_out(image)
-
-
-@router.post("/gallery/reorder", response_model=list[GalleryImageAdminOut])
-async def reorder_gallery(
-    payload: GalleryReorder, coach: CurrentCoach, db: DbSession
-) -> list[GalleryImageAdminOut]:
-    """Persist a drag-and-drop reorder as one transaction.
-
-    Position is taken from the order of the submitted ids rather than from a
-    per-item index the client calculates. The client already knows the order —
-    it just dragged it — and recomputing indices here removes an entire class
-    of off-by-one bug where two items claim position 3.
+    One request rather than one per heading. The gallery page renders a
+    section per category and a client with eight categories would otherwise
+    open eight connections on first paint — which is the difference between a
+    fast Largest Contentful Paint and a slow one on the page most likely to be
+    someone's first impression.
     """
     rows = (
-        (await db.execute(select(GalleryImage).where(GalleryImage.id.in_(payload.ids))))
+        (
+            await db.execute(
+                select(GalleryImage)
+                .where(GalleryImage.is_published.is_(True))
+                .order_by(
+                    GalleryImage.category,
+                    GalleryImage.is_featured.desc(),
+                    GalleryImage.sort_order,
+                    GalleryImage.created_at.desc(),
+                )
+            )
+        )
         .scalars()
         .all()
     )
-    by_id = {row.id: row for row in rows}
-    missing = [str(i) for i in payload.ids if i not in by_id]
-    if missing:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="One of those images no longer exists. Refresh and try again.",
+
+    grouped: dict[GalleryCategory, list[GalleryImage]] = defaultdict(list)
+    for image in rows:
+        if len(grouped[image.category]) < per_category:
+            grouped[image.category].append(image)
+
+    # Iterating the label map rather than the grouped dict keeps the section
+    # order stable and editorial, instead of whatever the enum comparison or
+    # insertion order happens to produce.
+    return [
+        GallerySection(
+            category=category,
+            label=label,
+            images=[serialise(image) for image in grouped[category]],
         )
-
-    for position, image_id in enumerate(payload.ids):
-        by_id[image_id].sort_order = position
-    await db.flush()
-
-    return [_admin_out(by_id[image_id]) for image_id in payload.ids]
+        for category, label in GALLERY_CATEGORY_LABELS.items()
+        if grouped.get(category)
+    ]
 
 
-@router.delete("/gallery/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_gallery_image(
-    image_id: uuid.UUID, coach: CurrentCoach, db: DbSession
-) -> None:
-    """Remove the row and the file behind it.
+@router.get("/categories", response_model=list[GalleryCategoryOption])
+async def list_categories(
+    db: DbSession,
+) -> list[GalleryCategoryOption]:
+    counts = dict(
+        (
+            await db.execute(
+                select(GalleryImage.category, func.count(GalleryImage.id))
+                .where(GalleryImage.is_published.is_(True))
+                .group_by(GalleryImage.category)
+            )
+        ).all()
+    )
+    return category_options({key.value: value for key, value in counts.items()})
 
-    A hard delete, unlike the soft delete used for exercises. Nothing
-    references a gallery image — no session log, no plan, no historic record —
-    so keeping the row would only keep the file on the volume, and the coach
-    who deletes a photo means it to be gone.
+
+@router.get("/{image_id}/file")
+async def gallery_file(
+    image_id: uuid.UUID, db: DbSession
+) -> FileResponse:
+    """The bytes. Public, immutable, cached hard.
+
+    Safe to cache for a year because replacing an image writes a new random
+    filename and a new row id — see `storage.save_gallery_image`. A URL that
+    has been cached at the edge can therefore never start serving a different
+    photo than the one it was cached for.
     """
     image = await db.get(GalleryImage, image_id)
-    if image is None:
+    if image is None or not image.is_published:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
 
-    key = image.image_key
-    await db.delete(image)
-    await db.flush()
-    storage.delete_file(key)
+    return FileResponse(
+        storage.resolve_path(image.image_key),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
-    log.info("gallery.deleted", image_id=str(image_id))
+
+@router.get("/{slug}", response_model=GalleryImageOut)
+async def get_image(slug: str, db: DbSession) -> GalleryImageOut:
+    image = (
+        await db.execute(
+            select(GalleryImage).where(
+                GalleryImage.slug == slug, GalleryImage.is_published.is_(True)
+            )
+        )
+    ).scalar_one_or_none()
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
+    return serialise(image)

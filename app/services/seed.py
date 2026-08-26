@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
+from app.data.exercise_library import VIDEO_BASE
 from app.models.billing import Subscription
 from app.models.catalog import Exercise, Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
@@ -445,12 +446,17 @@ async def seed_catalog(db: AsyncSession) -> None:
             Exercise(
                 slug=slug,
                 name=name,
+                muscle_group="General",
                 target_muscle=target,
                 secondary_muscles=secondary,
                 equipment=equipment,
+                mechanics="Compound",
+                force_type="Push/Pull",
                 coaching_cue=cue,
-                video_url=None,  # the coach adds links from the dashboard
+                video_url=f"{VIDEO_BASE}/{slug}",
+                source_url=f"{VIDEO_BASE}/{slug}",
                 min_level=TrainingLevel.LEVEL_1,
+                popularity=5,
             )
         )
 
@@ -912,7 +918,6 @@ async def seed_clients(db: AsyncSession, coach: User) -> int:
                         status=SubscriptionStatus.ACTIVE,
                         price_cents=program.price_cents,
                         currency="usd",
-                        billing_period=program.billing_period,
                         started_at=started,
                         current_period_start=datetime.now(UTC) - timedelta(days=7),
                         current_period_end=datetime.now(UTC) + timedelta(days=23),

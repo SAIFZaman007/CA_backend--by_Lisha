@@ -91,22 +91,26 @@ ATTACHMENT_KINDS = ("image",)
 
 def upgrade() -> None:
     bind = op.get_bind()
-
+    
+    # --- Clean up any pre-existing orphan enum types before creation ---------
     # --- Extend the existing `equipment` enum --------------------------------
     #
     # Outside the surrounding transaction, for the reasons in the module
     # docstring. `IF NOT EXISTS` makes this re-runnable, which matters because
     # a migration that half-applied and then failed must be safe to retry.
     with op.get_context().autocommit_block():
+        for enum_name in ("gallery_category", "muscle_group", "mechanics", "force_type", "attachment_kind"):
+            op.execute(f"DROP TYPE IF EXISTS {enum_name} CASCADE;")
+        
         for value in NEW_EQUIPMENT:
             op.execute(f"ALTER TYPE equipment ADD VALUE IF NOT EXISTS '{value}'")
 
-    # --- New enum types ------------------------------------------------------
-    muscle_group = postgresql.ENUM(*MUSCLE_GROUPS, name="muscle_group")
-    mechanics = postgresql.ENUM(*MECHANICS, name="mechanics")
-    force_type = postgresql.ENUM(*FORCE_TYPES, name="force_type")
-    gallery_category = postgresql.ENUM(*GALLERY_CATEGORIES, name="gallery_category")
-    attachment_kind = postgresql.ENUM(*ATTACHMENT_KINDS, name="attachment_kind")
+    # 2. Instantiate ENUM objects with create_type=False for columns so SQLAlchemy doesn't auto-create them twice
+    muscle_group = postgresql.ENUM(*MUSCLE_GROUPS, name="muscle_group", create_type=False)
+    mechanics = postgresql.ENUM(*MECHANICS, name="mechanics", create_type=False)
+    force_type = postgresql.ENUM(*FORCE_TYPES, name="force_type", create_type=False)
+    gallery_category = postgresql.ENUM(*GALLERY_CATEGORIES, name="gallery_category", create_type=False)
+    attachment_kind = postgresql.ENUM(*ATTACHMENT_KINDS, name="attachment_kind", create_type=False)
 
     for enum_type in (muscle_group, mechanics, force_type, gallery_category, attachment_kind):
         enum_type.create(bind, checkfirst=True)
@@ -132,9 +136,15 @@ def upgrade() -> None:
     # matching the free-text label that has been carrying this meaning until
     # now. Anything unrecognised lands in `abs` and is re-filed correctly the
     # first time `POST /admin/exercises/sync` runs.
+    # Every branch of this CASE is a string literal, so Postgres infers the
+    # expression's type as `text`. The column it is being assigned to is the
+    # native `muscle_group` enum, and Postgres will not implicitly cast
+    # text -> enum even though every literal here is a valid member of it —
+    # that gap is exactly what raised `DatatypeMismatchError` on first run.
+    # The `::muscle_group` cast on the CASE result closes it explicitly.
     op.execute(
         """
-        UPDATE exercises SET muscle_group = CASE
+        UPDATE exercises SET muscle_group = (CASE
             WHEN target_muscle ILIKE '%quad%'        THEN 'quads'
             WHEN target_muscle ILIKE '%hamstring%'   THEN 'hamstrings'
             WHEN target_muscle ILIKE '%glute%'       THEN 'glutes'
@@ -164,7 +174,7 @@ def upgrade() -> None:
             WHEN target_muscle ILIKE '%hip flexor%'
               OR target_muscle ILIKE '%psoas%'       THEN 'hip_flexors'
             ELSE 'abs'
-        END
+        END)::muscle_group
         WHERE muscle_group IS NULL
         """
     )

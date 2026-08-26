@@ -23,6 +23,7 @@ dependencies = [
     "pillow==12.3.0",
     "structlog==26.1.0",
     "python-slugify==8.0.4",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
