@@ -13,10 +13,10 @@ rollback to the previous application version keeps working against this schema.
 4. `workout_day_exercises.video_url` — a per-prescription demonstration that
    overrides the library's.
 
-On the `equipment` enum. Ten new values are added to a native PostgreSQL
+**On the `equipment` enum.** Ten new values are added to a native PostgreSQL
 enum. `ALTER TYPE ... ADD VALUE` could not run inside a transaction at all
 before PostgreSQL 12, and even on 12+ a value added in a transaction cannot be
-used by a later statement in that same transaction. Alembic wraps migrations
+*used* by a later statement in that same transaction. Alembic wraps migrations
 in a transaction by default, so both halves of that are a problem here. The
 `autocommit_block()` below drops out of the transaction for exactly the ALTER
 statements and rejoins for everything else.
@@ -134,39 +134,37 @@ def upgrade() -> None:
     # first time `POST /admin/exercises/sync` runs.
     op.execute(
         """
-        UPDATE exercises SET muscle_group = (
-            CASE
-                WHEN target_muscle ILIKE '%quad%'         THEN 'quads'
-                WHEN target_muscle ILIKE '%hamstring%'    THEN 'hamstrings'
-                WHEN target_muscle ILIKE '%glute%'        THEN 'glutes'
-                WHEN target_muscle ILIKE '%calf%'
-                  OR target_muscle ILIKE '%calve%'
-                  OR target_muscle ILIKE '%soleus%'       THEN 'calves'
-                WHEN target_muscle ILIKE '%chest%'        THEN 'chest'
-                WHEN target_muscle ILIKE '%lat%'
-                  OR target_muscle ILIKE '%posterior chain%' THEN 'lats'
-                WHEN target_muscle ILIKE '%rear delt%'
-                  OR target_muscle ILIKE '%rhomboid%'
-                  OR target_muscle ILIKE '%mid back%'     THEN 'upper_back'
-                WHEN target_muscle ILIKE '%lower back%'
-                  OR target_muscle ILIKE '%erector%'      THEN 'lower_back'
-                WHEN target_muscle ILIKE '%shoulder%'
-                  OR target_muscle ILIKE '%delt%'         THEN 'shoulders'
-                WHEN target_muscle ILIKE '%bicep%'        THEN 'biceps'
-                WHEN target_muscle ILIKE '%tricep%'       THEN 'triceps'
-                WHEN target_muscle ILIKE '%trap%'         THEN 'traps'
-                WHEN target_muscle ILIKE '%forearm%'
-                  OR target_muscle ILIKE '%grip%'
-                  OR target_muscle ILIKE '%wrist%'        THEN 'forearms'
-                WHEN target_muscle ILIKE '%oblique%'      THEN 'obliques'
-                WHEN target_muscle ILIKE '%neck%'         THEN 'neck'
-                WHEN target_muscle ILIKE '%adductor%'     THEN 'adductors'
-                WHEN target_muscle ILIKE '%abductor%'     THEN 'abductors'
-                WHEN target_muscle ILIKE '%hip flexor%'
-                  OR target_muscle ILIKE '%psoas%'        THEN 'hip_flexors'
-                ELSE 'abs'
-            END
-        )::muscle_group
+        UPDATE exercises SET muscle_group = CASE
+            WHEN target_muscle ILIKE '%quad%'        THEN 'quads'
+            WHEN target_muscle ILIKE '%hamstring%'   THEN 'hamstrings'
+            WHEN target_muscle ILIKE '%glute%'       THEN 'glutes'
+            WHEN target_muscle ILIKE '%calf%'
+              OR target_muscle ILIKE '%calve%'
+              OR target_muscle ILIKE '%soleus%'      THEN 'calves'
+            WHEN target_muscle ILIKE '%chest%'       THEN 'chest'
+            WHEN target_muscle ILIKE '%lat%'
+              OR target_muscle ILIKE '%posterior chain%' THEN 'lats'
+            WHEN target_muscle ILIKE '%rear delt%'
+              OR target_muscle ILIKE '%rhomboid%'
+              OR target_muscle ILIKE '%mid back%'    THEN 'upper_back'
+            WHEN target_muscle ILIKE '%lower back%'
+              OR target_muscle ILIKE '%erector%'     THEN 'lower_back'
+            WHEN target_muscle ILIKE '%shoulder%'
+              OR target_muscle ILIKE '%delt%'        THEN 'shoulders'
+            WHEN target_muscle ILIKE '%bicep%'       THEN 'biceps'
+            WHEN target_muscle ILIKE '%tricep%'      THEN 'triceps'
+            WHEN target_muscle ILIKE '%trap%'        THEN 'traps'
+            WHEN target_muscle ILIKE '%forearm%'
+              OR target_muscle ILIKE '%grip%'
+              OR target_muscle ILIKE '%wrist%'       THEN 'forearms'
+            WHEN target_muscle ILIKE '%oblique%'     THEN 'obliques'
+            WHEN target_muscle ILIKE '%neck%'        THEN 'neck'
+            WHEN target_muscle ILIKE '%adductor%'    THEN 'adductors'
+            WHEN target_muscle ILIKE '%abductor%'    THEN 'abductors'
+            WHEN target_muscle ILIKE '%hip flexor%'
+              OR target_muscle ILIKE '%psoas%'       THEN 'hip_flexors'
+            ELSE 'abs'
+        END
         WHERE muscle_group IS NULL
         """
     )
