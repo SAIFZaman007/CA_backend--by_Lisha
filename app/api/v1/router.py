@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     calculators,
     dashboard,
     exercises,
+    gallery,
     messages,
     nutrition,
     progress,
@@ -24,6 +25,10 @@ api_router = APIRouter()
 # Open to visitors
 api_router.include_router(public.router)
 api_router.include_router(calculators.router)
+# The Hall of the Coach. Public and unauthenticated on purpose — it is
+# marketing imagery meant to be crawled and indexed, which is the opposite of
+# how `progress.router` treats a check-in photo.
+api_router.include_router(gallery.router)
 
 # Account
 api_router.include_router(auth.router)

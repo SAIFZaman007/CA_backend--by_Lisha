@@ -3,10 +3,11 @@
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import (
     ActivityLevel,
+    AttachmentKind,
     CardioType,
     DataSource,
     Goal,
@@ -232,8 +233,49 @@ class CardioBurnResponse(BaseModel):
 # --- Engagement ----------------------------------------------------------------
 
 
+class AttachmentOut(BaseModel):
+    """One image hanging off a message.
+
+    `url` is a signed, short-lived link rather than a stored path. A browser
+    <img> tag cannot send an Authorization header, so a private image has to
+    carry its authorisation in the URL — see `messages.attachment_url`.
+    """
+
+    id: uuid.UUID
+    kind: AttachmentKind
+    url: str
+    content_type: str
+    file_size_bytes: int
+    width: int | None = None
+    height: int | None = None
+    original_name: str | None = None
+
+
+class AttachmentUploadOut(AttachmentOut):
+    """What the upload endpoint returns, for the composer's preview strip."""
+
+
 class MessageIn(BaseModel):
-    body: str = Field(min_length=1, max_length=4000)
+    # Optional, because an image on its own is a complete message. A client
+    # photographing a loaded bar with "is this right?" implied does not need to
+    # be forced to type a caption before the send button works.
+    body: str = Field(default="", max_length=4000)
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "MessageIn":
+        if not self.body.strip() and not self.attachment_ids:
+            raise ValueError("Write something, or attach an image.")
+        return self
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        seen: list[uuid.UUID] = []
+        for item in value:
+            if item not in seen:
+                seen.append(item)
+        return seen
 
 
 class MessageOut(BaseModel):
@@ -244,6 +286,7 @@ class MessageOut(BaseModel):
     body: str
     read_at: datetime | None = None
     created_at: datetime
+    attachments: list[AttachmentOut] = []
 
 
 class ThreadOut(BaseModel):

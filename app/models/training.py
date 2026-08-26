@@ -101,6 +101,16 @@ class WorkoutDayExercise(UUIDMixin, TimestampMixin, Base):
     target_weight_kg: Mapped[float | None] = mapped_column(Numeric(6, 2))
     coach_note: Mapped[str | None] = mapped_column(String(300))
 
+    # A per-prescription demonstration that wins over the library's.
+    #
+    # The library video shows the textbook movement; sometimes a client needs
+    # the variation the coach means for *them* — a box squat rather than a
+    # squat, a rep tempo demo, a phone clip of their own setup corrected. When
+    # this is null the client is shown `exercise.video_url`, so the guarantee
+    # that every assigned movement has a video holds either way. See
+    # `app.services.programming.resolve_demo_video`.
+    video_url: Mapped[str | None] = mapped_column(String(500))
+
     day: Mapped[WorkoutDay] = relationship(back_populates="exercises")
     exercise: Mapped["Exercise"] = relationship(lazy="selectin")  # noqa: F821
 

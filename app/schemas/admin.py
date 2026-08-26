@@ -7,7 +7,7 @@ read models here are deliberately explicit about what leaves the database.
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
 
 from app.models.enums import (
     ActivityLevel,
@@ -224,6 +224,11 @@ class CoachProfileUpdate(BaseModel):
 
 class PlanExerciseIn(BaseModel):
     exercise_id: uuid.UUID
+    # A demonstration for *this* client's version of the movement, overriding
+    # the library's. Optional because the library link covers nearly every
+    # case; when both are absent the save is refused outright — see
+    # `app.services.programming.assert_every_movement_has_video`.
+    video_url: HttpUrl | None = None
     sets: int = Field(default=3, ge=1, le=12)
     rep_range: str = Field(default="8-12", max_length=30)
     rest_seconds: int = Field(default=60, ge=0, le=900)
@@ -265,6 +270,10 @@ class PlanExerciseOut(BaseModel):
     tempo: str | None = None
     target_weight_kg: float | None = None
     coach_note: str | None = None
+    # Always populated on a saved plan. The write path refuses anything that
+    # cannot resolve one, so the client portal can render the "watch this"
+    # button unconditionally rather than hiding it half the time.
+    video_url: str | None = None
 
 
 class PlanDayOut(BaseModel):
@@ -410,12 +419,25 @@ class ProgramAdminOut(BaseModel):
 # --- Inbox --------------------------------------------------------------------
 
 
+class ThreadAttachment(BaseModel):
+    """An image the client sent, addressed by a short-lived signed URL."""
+
+    id: uuid.UUID
+    url: str
+    content_type: str
+    file_size_bytes: int
+    width: int | None = None
+    height: int | None = None
+    original_name: str | None = None
+
+
 class ThreadMessage(BaseModel):
     id: uuid.UUID
     body: str
     created_at: datetime
     read_at: datetime | None = None
     from_coach: bool
+    attachments: list[ThreadAttachment] = []
 
 
 class ThreadOut(BaseModel):
@@ -435,10 +457,13 @@ class ThreadSummary(BaseModel):
     last_message_at: datetime | None = None
     preview: str | None = None
     unread: int = 0
+    # So the list can show a paperclip on a message that is only a photo.
+    has_attachments: bool = False
 
 
 class MessageIn(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
+
 
 
 class LeadOut(BaseModel):

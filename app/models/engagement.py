@@ -3,12 +3,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, TimestampMixin, UUIDMixin
-from app.models.enums import BookingStatus, LeadStatus, TrainingLevel
+from app.models.enums import AttachmentKind, BookingStatus, LeadStatus, TrainingLevel
 
 
 class MessageThread(UUIDMixin, TimestampMixin, Base):
@@ -44,10 +44,80 @@ class Message(UUIDMixin, TimestampMixin, Base):
     sender_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Stays NOT NULL, but an image-only message stores an empty string rather
+    # than forcing the sender to invent a caption. The schema layer enforces
+    # the real rule: a message must carry text, an attachment, or both.
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     thread: Mapped[MessageThread] = relationship(back_populates="messages")
+    attachments: Mapped[list["MessageAttachment"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        order_by="MessageAttachment.created_at",
+        lazy="selectin",
+    )
+
+
+class MessageAttachment(UUIDMixin, TimestampMixin, Base):
+    """An image a client sent their coach — a loaded bar, a meal, a scale.
+
+    `message_id` is nullable, and that is the whole design. Bytes go up on
+    their own request and land here unattached, owned by the uploader. The
+    message that references them is written afterwards, in a second call, and
+    binds them.
+
+    Two things fall out of that. A slow upload over gym wi-fi does not block
+    the text box, and a validation failure on the message does not make anyone
+    re-send a 6 MB photo. The cost is orphan rows when someone attaches a photo
+    and then closes the tab; `purge_orphan_attachments` sweeps those.
+    """
+
+    __tablename__ = "message_attachments"
+    __table_args__ = (
+        # Declared on the model as well as in the migration, so autogenerate
+        # does not decide this index is drift and propose dropping it.
+        #
+        # Partial, matching the orphan sweep exactly: my unbound uploads older
+        # than a cutoff. Indexing only the rows where `message_id IS NULL`
+        # keeps it to the handful that are actually in play rather than the
+        # whole attachment history, which is almost entirely bound rows the
+        # sweep will never look at.
+        Index(
+            "ix_message_attachments_orphans",
+            "uploaded_by_id",
+            "created_at",
+            postgresql_where=text("message_id IS NULL"),
+        ),
+    )
+
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        index=True,
+    )
+    # Kept even after binding: this is who is allowed to reference the row
+    # while it is still unbound, and it is the only check standing between one
+    # client and another client's upload.
+    uploaded_by_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+
+    kind: Mapped[AttachmentKind] = mapped_column(
+        Enum(AttachmentKind, name="attachment_kind"),
+        default=AttachmentKind.IMAGE,
+        nullable=False,
+    )
+    file_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), default="image/jpeg", nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    # The client's own filename, shown on hover and used for the download name.
+    # Never used to build a path — see `storage.save_message_image`.
+    original_name: Mapped[str | None] = mapped_column(String(200))
+
+    message: Mapped["Message | None"] = relationship(back_populates="attachments")
 
 
 class ConsultationBooking(UUIDMixin, TimestampMixin, Base):

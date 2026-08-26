@@ -1,17 +1,18 @@
-"""Local disk storage for progress photos.
+"""Local disk storage for private and public media.
 
 Photos are private. Files are written outside the web root and served only
 through an authenticated endpoint, never as static assets. Swap this module
-for S3/R2 by keeping the same three function signatures.
+for S3/R2 by keeping the same function signatures.
 """
 
 import secrets
 import uuid
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.core.config import settings
 
@@ -24,40 +25,68 @@ def _root() -> Path:
     return path
 
 
-async def save_progress_photo(
-    client_id: uuid.UUID, upload: UploadFile, on_date: date
-) -> tuple[str, str, int]:
-    """Validate, strip metadata, downscale and store. Returns (key, type, bytes)."""
+def _guard_image_type(upload: UploadFile) -> None:
+    """Reject the wrong sort of file before reading a single byte of it.
+
+    The declared content type is only a header and is not trusted on its own —
+    `_normalise` decoding the bytes with Pillow is the real check. This just
+    turns the common honest mistake (a PDF, a HEIC straight off an iPhone) into
+    a clear sentence instead of a decode failure.
+    """
     if upload.content_type not in settings.ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Upload a JPEG, PNG or WebP image.",
         )
 
+
+async def _read_within_limit(upload: UploadFile, limit_mb: int) -> bytes:
     raw = await upload.read()
-    limit = settings.MAX_UPLOAD_MB * 1024 * 1024
+    limit = limit_mb * 1024 * 1024
     if len(raw) > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"That image is over {settings.MAX_UPLOAD_MB} MB. Try a smaller one.",
+            detail=f"That image is over {limit_mb} MB. Try a smaller one.",
         )
+    if not raw:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That file was empty.")
+    return raw
+
+
+def _normalise(raw: bytes, destination: Path, *, max_side: int, quality: int) -> tuple[int, int]:
+    """Decode, strip metadata, orient, downscale, write JPEG. Returns (w, h).
+
+    `exif_transpose` runs before the EXIF is dropped. Phone cameras record
+    orientation in EXIF rather than rotating the pixels, so converting first
+    and stripping second is how a portrait photo arrives on its side.
+    """
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            image = ImageOps.exif_transpose(image)
+            image = image.convert("RGB")  # drops EXIF, including GPS coordinates
+            image.thumbnail((max_side, max_side), Image.LANCZOS)
+            image.save(destination, "JPEG", quality=quality, optimize=True)
+            return image.width, image.height
+    except (UnidentifiedImageError, OSError) as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail="That file could not be read as an image."
+        ) from exc
+
+
+async def save_progress_photo(
+    client_id: uuid.UUID, upload: UploadFile, on_date: date
+) -> tuple[str, str, int]:
+    """Validate, strip metadata, downscale and store. Returns (key, type, bytes)."""
+    _guard_image_type(upload)
+    raw = await _read_within_limit(upload, settings.MAX_UPLOAD_MB)
 
     directory = _root() / str(client_id) / on_date.isoformat()
     directory.mkdir(parents=True, exist_ok=True)
     filename = f"{secrets.token_urlsafe(12)}.jpg"
     destination = directory / filename
 
-    try:
-        from io import BytesIO
-
-        with Image.open(BytesIO(raw)) as image:
-            image = image.convert("RGB")  # drops EXIF, including GPS coordinates
-            image.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
-            image.save(destination, "JPEG", quality=85, optimize=True)
-    except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, detail="That file could not be read as an image."
-        ) from exc
+    _normalise(raw, destination, max_side=MAX_DIMENSION, quality=85)
 
     key = f"{client_id}/{on_date.isoformat()}/{filename}"
     return key, "image/jpeg", destination.stat().st_size
@@ -77,6 +106,72 @@ def delete_file(key: str) -> None:
         resolve_path(key).unlink(missing_ok=True)
     except HTTPException:
         pass
+
+
+# --- Message attachments ------------------------------------------------------
+#
+# A client photographing a loaded bar, a meal, or their setup mid-set. Private
+# health-adjacent data: same treatment as a check-in photo — written under the
+# sender's own directory, never served as a static file, only ever reachable
+# through a signed, short-lived URL bound to one viewer and one attachment.
+
+MESSAGE_IMAGE_MAX = 1600
+
+
+async def save_message_image(
+    sender_id: uuid.UUID, upload: UploadFile
+) -> tuple[str, str, int, int, int]:
+    """Store a message image. Returns (key, content_type, bytes, width, height).
+
+    The client's filename is never used to build the path — it is recorded in
+    the database for display only. A filename is attacker-controlled input, and
+    the shortest route from "helpful, we kept their filename" to writing
+    outside the upload root is treating one as a path component.
+    """
+    _guard_image_type(upload)
+    raw = await _read_within_limit(upload, settings.MAX_MESSAGE_IMAGE_MB)
+
+    directory = _root() / "messages" / str(sender_id) / date.today().isoformat()
+    directory.mkdir(parents=True, exist_ok=True)
+    filename = f"{secrets.token_urlsafe(16)}.jpg"
+    destination = directory / filename
+
+    width, height = _normalise(raw, destination, max_side=MESSAGE_IMAGE_MAX, quality=82)
+
+    key = f"messages/{sender_id}/{date.today().isoformat()}/{filename}"
+    return key, "image/jpeg", destination.stat().st_size, width, height
+
+
+# --- Gallery ------------------------------------------------------------------
+#
+# Public marketing imagery — the Hall of the Coach. Unlike everything above,
+# these are meant to be crawled and cached, so they are stored under a flat
+# public prefix and served with long cache headers and no authentication.
+
+GALLERY_IMAGE_MAX = 1800
+
+
+async def save_gallery_image(upload: UploadFile) -> tuple[str, int, int, int]:
+    """Store a gallery image. Returns (key, bytes, width, height).
+
+    Dimensions come back because the public page needs them to reserve layout
+    space before the bytes land. Without that the grid reflows as each image
+    arrives, which is a Cumulative Layout Shift penalty on precisely the page
+    the client wants ranking.
+    """
+    _guard_image_type(upload)
+    raw = await _read_within_limit(upload, settings.MAX_UPLOAD_MB)
+
+    directory = _root() / "gallery"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Random rather than derived from the row id: replacing an image writes a
+    # new file, so a URL cached at the edge for a year can never serve the
+    # photo that used to be in that slot.
+    filename = f"{secrets.token_urlsafe(14)}.jpg"
+    destination = directory / filename
+
+    width, height = _normalise(raw, destination, max_side=GALLERY_IMAGE_MAX, quality=84)
+    return f"gallery/{filename}", destination.stat().st_size, width, height
 
 
 # --- Coaching videos ----------------------------------------------------------
@@ -152,18 +247,8 @@ PROGRAM_IMAGE_MAX = 1400
 
 async def save_program_image(program_id: uuid.UUID, upload: UploadFile) -> tuple[str, int]:
     """Validate, downscale and store a tier's hero image. Returns (key, bytes)."""
-    if upload.content_type not in settings.ALLOWED_IMAGE_TYPES:
-        raise HTTPException(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Upload a JPEG, PNG or WebP image."
-        )
-
-    raw = await upload.read()
-    limit = settings.MAX_UPLOAD_MB * 1024 * 1024
-    if len(raw) > limit:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"That image is over {settings.MAX_UPLOAD_MB} MB. Try a smaller one.",
-        )
+    _guard_image_type(upload)
+    raw = await _read_within_limit(upload, settings.MAX_UPLOAD_MB)
 
     directory = _root() / "programs"
     directory.mkdir(parents=True, exist_ok=True)
@@ -172,16 +257,5 @@ async def save_program_image(program_id: uuid.UUID, upload: UploadFile) -> tuple
     filename = f"{program_id}-{secrets.token_urlsafe(8)}.jpg"
     destination = directory / filename
 
-    try:
-        from io import BytesIO
-
-        with Image.open(BytesIO(raw)) as image:
-            image = image.convert("RGB")
-            image.thumbnail((PROGRAM_IMAGE_MAX, PROGRAM_IMAGE_MAX), Image.LANCZOS)
-            image.save(destination, "JPEG", quality=86, optimize=True)
-    except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, detail="That file could not be read as an image."
-        ) from exc
-
+    _normalise(raw, destination, max_side=PROGRAM_IMAGE_MAX, quality=86)
     return f"programs/{filename}", destination.stat().st_size

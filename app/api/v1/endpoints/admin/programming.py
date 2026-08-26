@@ -17,6 +17,7 @@ from app.models.catalog import Exercise
 from app.models.nutrition import Meal, MealItem, MealPlan
 from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan
 from app.models.user import User
+from app.services.programming import assert_every_movement_has_video
 from app.schemas.admin import (
     MealOut,
     MealPlanIn,
@@ -38,7 +39,15 @@ async def _require_client(db: DbSession, client_id: uuid.UUID) -> User:
     return user
 
 
-def _plan_out(plan: WorkoutPlan) -> WorkoutPlanOut:
+def _plan_out(plan: WorkoutPlan, video_index: dict | None = None) -> WorkoutPlanOut:
+    """Serialise a plan, resolving each prescription's demonstration video.
+
+    `video_index` is the map `assert_every_movement_has_video` already built
+    during a write; passing it through avoids rebuilding it. On a plain read it
+    is absent and the per-prescription override plus the library link on the
+    eagerly-loaded `item.exercise` are enough — no extra query either way.
+    """
+    index = video_index or {}
     return WorkoutPlanOut(
         id=plan.id,
         name=plan.name,
@@ -72,6 +81,11 @@ def _plan_out(plan: WorkoutPlan) -> WorkoutPlanOut:
                         if item.target_weight_kg is not None
                         else None,
                         coach_note=item.coach_note,
+                        video_url=(
+                            item.video_url
+                            or (item.exercise.video_url if item.exercise else None)
+                            or index.get(item.exercise_id)
+                        ),
                     )
                     for item in day.exercises
                 ],
@@ -85,6 +99,16 @@ async def _write_days(db: DbSession, plan: WorkoutPlan, payload: WorkoutPlanIn) 
     """Rebuild the day/exercise tree under a plan. Every referenced movement is
     verified first, so a bad ID fails the whole save rather than silently
     dropping an exercise out of the client's programme."""
+    # The rule a client's programme depends on: every prescribed movement must
+    # resolve to a demonstration they can watch. Enforced here rather than in
+    # the dashboard, because the API is the boundary — a plan written by a
+    # script or a replayed request would walk straight past a front-end check.
+    prescriptions = [
+        (item.exercise_id, item.video_url) for day in payload.days for item in day.exercises
+    ]
+    if prescriptions:
+        await assert_every_movement_has_video(db, prescriptions)
+
     wanted = {item.exercise_id for day in payload.days for item in day.exercises}
     if wanted:
         found = set(
@@ -127,6 +151,7 @@ async def _write_days(db: DbSession, plan: WorkoutPlan, payload: WorkoutPlanIn) 
                     tempo=item.tempo,
                     target_weight_kg=item.target_weight_kg,
                     coach_note=item.coach_note,
+                    video_url=str(item.video_url) if item.video_url else None,
                 )
             )
     await db.flush()
@@ -287,6 +312,7 @@ async def duplicate_plan(
                     tempo=item.tempo,
                     target_weight_kg=item.target_weight_kg,
                     coach_note=item.coach_note,
+                    video_url=item.video_url,
                 )
             )
 

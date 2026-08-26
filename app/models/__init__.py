@@ -3,16 +3,27 @@
 from app.core.database import Base
 from app.models.billing import Payment, Subscription, WebhookEvent
 from app.models.catalog import Exercise, Program, Testimonial
-from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
+from app.models.engagement import (
+    ConsultationBooking,
+    Lead,
+    Message,
+    MessageAttachment,
+    MessageThread,
+)
 from app.models.enums import (
     ActivityLevel,
+    AttachmentKind,
     BookingStatus,
     CardioType,
     DataSource,
     Equipment,
+    ForceType,
+    GalleryCategory,
     Goal,
     Intensity,
     LeadStatus,
+    Mechanics,
+    MuscleGroup,
     PhotoPose,
     SessionStatus,
     Sex,
@@ -23,6 +34,7 @@ from app.models.enums import (
     UserRole,
     VideoProvider,
 )
+from app.models.gallery import GalleryImage
 from app.models.media import VideoTutorial
 from app.models.nutrition import Meal, MealItem, MealLog, MealPlan
 from app.models.tracking import (
@@ -37,6 +49,7 @@ from app.models.user import ClientProfile, RefreshSession, User
 
 __all__ = [
     "ActivityLevel",
+    "AttachmentKind",
     "Base",
     "BodyMeasurement",
     "BookingStatus",
@@ -47,6 +60,9 @@ __all__ = [
     "DataSource",
     "Equipment",
     "Exercise",
+    "ForceType",
+    "GalleryCategory",
+    "GalleryImage",
     "Goal",
     "Intensity",
     "Lead",
@@ -55,8 +71,11 @@ __all__ = [
     "MealItem",
     "MealLog",
     "MealPlan",
+    "Mechanics",
     "Message",
+    "MessageAttachment",
     "MessageThread",
+    "MuscleGroup",
     "PhotoPose",
     "Program",
     "ProgressPhoto",

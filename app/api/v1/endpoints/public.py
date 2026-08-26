@@ -1,9 +1,18 @@
-"""Everything the marketing site needs, without a login."""
+"""Everything the marketing site needs, without a login.
+
+Also home to the two files search engines fetch before anything else, the
+sitemap and robots.txt. Both are generated here rather than shipped as static
+files in the frontend build, because both need to list content that lives in
+the database — every published coaching tier, every gallery image — and a
+static file goes stale the moment the coach adds one.
+"""
 
 import uuid
+from datetime import datetime
+from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -11,6 +20,7 @@ from app.core.deps import DbSession, OptionalUser
 from app.core.logging import get_logger
 from app.core.rate_limit import limiter
 from app.models.catalog import Program, Testimonial
+from app.models.gallery import GalleryImage
 from app.models.engagement import ConsultationBooking, Lead
 from app.schemas.catalog import ProgramOut, TestimonialOut
 from app.schemas.tracking import BookingIn, BookingOut, LeadIn
@@ -132,4 +142,171 @@ async def program_image(program_id: uuid.UUID, db: DbSession) -> FileResponse:
         storage.resolve_path(program.image_key),
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# --- Search engines -----------------------------------------------------------
+#
+# Generated, not static. Both files have to list database-backed content — the
+# coaching tiers and the gallery — and a file baked into the frontend build
+# goes stale the first time the coach publishes a photo.
+
+# Crawl priority is relative, not absolute: it tells a crawler which of *our*
+# pages matter most, nothing about how we rank against anyone else. The
+# homepage and the programme pages convert; the legal pages exist because they
+# have to.
+_STATIC_ROUTES: list[tuple[str, str, str]] = [
+    ("/", "weekly", "1.0"),
+    ("/programs", "weekly", "0.9"),
+    ("/gallery", "weekly", "0.8"),
+    ("/about", "monthly", "0.7"),
+    ("/tools", "monthly", "0.7"),
+    ("/contact", "monthly", "0.6"),
+    ("/privacy", "yearly", "0.2"),
+    ("/terms", "yearly", "0.2"),
+]
+
+
+def _url_entry(
+    loc: str, *, lastmod: datetime | None, changefreq: str, priority: str
+) -> str:
+    parts = [f"    <loc>{escape(loc)}</loc>"]
+    if lastmod is not None:
+        # W3C datetime, which is what the sitemap protocol asks for. A bare
+        # date is legal too, but a timestamp lets a crawler tell a photo
+        # published this morning from one published three weeks ago.
+        parts.append(f"    <lastmod>{lastmod.date().isoformat()}</lastmod>")
+    parts.append(f"    <changefreq>{changefreq}</changefreq>")
+    parts.append(f"    <priority>{priority}</priority>")
+    body = "\n".join(parts)
+    return f"  <url>\n{body}\n  </url>"
+
+
+@router.get("/meta/sitemap.xml", include_in_schema=False)
+async def sitemap(db: DbSession) -> Response:
+    """The sitemap, built from what is actually published right now.
+
+    Served through nginx at `/sitemap.xml` — see the frontend's nginx.conf. It
+    lives under the API because only the API knows which tiers are live and
+    which photos are published, and listing an unpublished URL is how a site
+    ends up with soft-404s in Search Console.
+    """
+    origin = settings.canonical_origin
+
+    entries = [
+        _url_entry(f"{origin}{path}", lastmod=None, changefreq=freq, priority=priority)
+        for path, freq, priority in _STATIC_ROUTES
+    ]
+
+    programs = (
+        (
+            await db.execute(
+                select(Program)
+                .where(Program.is_active.is_(True))
+                .order_by(Program.sort_order)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    entries.extend(
+        _url_entry(
+            f"{origin}/programs/{program.slug}",
+            lastmod=program.updated_at,
+            changefreq="weekly",
+            priority="0.9",
+        )
+        for program in programs
+    )
+
+    # Image sitemap extension. Gallery photos are the one part of this site
+    # with real Google Images potential, and the `<image:>` namespace is how
+    # they get indexed with their captions attached rather than as anonymous
+    # files behind an API path.
+    images = (
+        (
+            await db.execute(
+                select(GalleryImage)
+                .where(GalleryImage.is_published.is_(True))
+                .order_by(GalleryImage.sort_order)
+                .limit(1000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if images:
+        image_nodes = "\n".join(
+            "    <image:image>\n"
+            f"      <image:loc>{escape(origin)}{settings.API_V1_PREFIX}/gallery/{image.id}/file</image:loc>\n"
+            f"      <image:title>{escape(image.title)}</image:title>\n"
+            f"      <image:caption>{escape(image.alt_text)}</image:caption>\n"
+            "    </image:image>"
+            for image in images
+        )
+        entries.append(
+            f"  <url>\n    <loc>{escape(origin)}/gallery</loc>\n"
+            f"    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n"
+            f"{image_nodes}\n  </url>"
+        )
+
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n'
+        '        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n'
+        + "\n".join(entries)
+        + "\n</urlset>\n"
+    )
+    return Response(
+        content=body,
+        media_type="application/xml",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/meta/robots.txt", include_in_schema=False)
+async def robots() -> PlainTextResponse:
+    """robots.txt, with the sitemap pointed at the canonical origin.
+
+    The portal is disallowed in full. Everything behind `/portal` is personal
+    health data — weights, measurements, photos — and while it all sits behind
+    authentication anyway, telling a crawler not to try is the belt to that
+    braces.
+
+    Answer engines get an explicit allow on the public pages. That is a
+    deliberate choice, not an oversight: the programme and calculator
+    explanations are written to be quoted, and being the source an assistant
+    cites is worth more to an online coaching business than the pageview it
+    replaces.
+    """
+    origin = settings.canonical_origin
+    body = f"""# {settings.BRAND_NAME} — {settings.BUSINESS_NAME}
+User-agent: *
+Allow: /
+
+# The client portal and account screens hold personal health data.
+Disallow: /portal
+Disallow: /login
+Disallow: /register
+Disallow: /forgot-password
+Disallow: /reset-password
+Disallow: /api/
+
+# Answer engines are welcome on the public pages.
+User-agent: GPTBot
+Allow: /
+Disallow: /portal
+
+User-agent: PerplexityBot
+Allow: /
+Disallow: /portal
+
+User-agent: ClaudeBot
+Allow: /
+Disallow: /portal
+
+Sitemap: {origin}/sitemap.xml
+"""
+    return PlainTextResponse(
+        body, headers={"Cache-Control": "public, max-age=86400"}
     )

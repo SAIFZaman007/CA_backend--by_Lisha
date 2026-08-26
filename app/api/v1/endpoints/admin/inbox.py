@@ -8,11 +8,13 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
+from app.api.v1.endpoints.messages import serialise_attachment
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
 from app.models.enums import BookingStatus, LeadStatus
 from app.models.user import User
 from app.schemas.admin import (
     BookingOut,
+    ThreadAttachment,
     BookingUpdate,
     LeadOut,
     LeadUpdate,
@@ -91,6 +93,10 @@ async def list_threads(
         last = thread.messages[-1] if thread.messages else None
         summaries.append(
             ThreadSummary(
+                # An image-only message has an empty body, so a preview line
+                # alone would render as blank and read as "nothing here". The
+                # flag is what puts a paperclip on the row instead.
+                has_attachments=bool(last and last.attachments),
                 thread_id=thread.id,
                 client_id=client.id,
                 client_name=client.display_name or client.full_name,
@@ -150,6 +156,14 @@ async def read_thread(
                 created_at=m.created_at,
                 read_at=m.read_at,
                 from_coach=m.sender_id != client_id,
+                attachments=[
+                    ThreadAttachment(
+                        **serialise_attachment(attachment, coach.id).model_dump(
+                            exclude={"kind"}
+                        )
+                    )
+                    for attachment in m.attachments
+                ],
             )
             for m in thread.messages
         ],
@@ -178,6 +192,7 @@ async def reply(
         created_at=message.created_at,
         read_at=None,
         from_coach=True,
+        attachments=[],
     )
 
 

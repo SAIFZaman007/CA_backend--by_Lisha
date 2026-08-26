@@ -6,6 +6,9 @@
                                          # existing one's password / role
     python -m app.cli deactivate-user   # switch an account off by email
     python -m app.cli healthcheck       # verify the database connection
+    python -m app.cli sync-exercises    # import/refresh the shipped exercise
+                                         # catalogue (idempotent, additive)
+    python -m app.cli verify-links      # HEAD-check every demonstration URL
 
 `seed` takes its credentials from settings — i.e. from the environment — and
 runs immediately, with no prompts and no confirmation. It used to ask for a
@@ -120,6 +123,54 @@ async def _deactivate_user() -> None:
         print(f"Deactivated {email}.")
 
 
+async def _sync_exercises() -> None:
+    """Import or refresh the shipped exercise catalogue.
+
+    Additive and idempotent, so it is safe to run on every deploy — it inserts
+    what is missing and backfills blanks, and never overwrites a demonstration
+    link or a cue the coach has edited by hand.
+    """
+    from app.data.exercise_library import catalog_size
+    from app.services.exercise_import import sync_catalog
+
+    async with SessionLocal() as db:
+        report = await sync_catalog(db)
+        # The commit is the point. `sync_catalog` only flushes, and a flush
+        # without a commit looks like a success in the logs and then rolls
+        # back silently when the session closes.
+        await db.commit()
+
+    print(
+        f"Catalogue synced ({catalog_size()} movements shipped): "
+        f"{report.created} created, {report.backfilled} backfilled, "
+        f"{report.unchanged} already current."
+    )
+
+
+async def _verify_links() -> None:
+    """HEAD-check every demonstration URL and print the ones that fail.
+
+    The catalogue's links are derived from a slug pattern rather than scraped,
+    so a handful will not resolve. This finds all of them in one pass instead
+    of one client complaint at a time.
+    """
+    from app.services.exercise_import import verify_video_links
+
+    async with SessionLocal() as db:
+        results = await verify_video_links(db)
+
+    broken = [row for row in results if not row.ok]
+    print(f"Checked {len(results)} links — {len(results) - len(broken)} OK, {len(broken)} broken.")
+    for row in broken:
+        reason = row.error or f"HTTP {row.status}"
+        print(f"  {row.name}: {reason}\n    {row.url}")
+    if broken:
+        print(
+            "\nRepoint these from Exercise Library in the dashboard, or edit "
+            "the name in app/data/exercise_library.py so the slug matches."
+        )
+
+
 async def _healthcheck() -> None:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
@@ -128,6 +179,8 @@ async def _healthcheck() -> None:
 
 COMMANDS = {
     "seed": _seed,
+    "sync-exercises": _sync_exercises,
+    "verify-links": _verify_links,
     "create-coach": _create_coach,
     "deactivate-user": _deactivate_user,
     "healthcheck": _healthcheck,
