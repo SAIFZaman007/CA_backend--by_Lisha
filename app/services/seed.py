@@ -40,14 +40,13 @@ import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
-from slugify import slugify
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
-from app.data.exercise_library import VIDEO_BASE
+from app.services.exercise_import import sync_catalog
 from app.models.billing import Subscription
 from app.models.catalog import Exercise, Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
@@ -151,50 +150,12 @@ PROGRAMS = [
     },
 ]
 
-# --- Exercise library ----------------------------------------------------------
-# name, target, secondary, equipment, cue
-EXERCISES = [
-    ("Barbell Back Squat", "Quads", ["Glutes", "Core"], Equipment.BARBELL,
-     "Control the descent — three seconds down."),
-    ("Romanian Deadlift", "Hamstrings", ["Glutes", "Lower back"], Equipment.BARBELL,
-     "Push the hips back. The bar stays against your legs."),
-    ("Leg Press", "Quads", ["Glutes"], Equipment.MACHINE,
-     "Feet shoulder-width. Do not let your lower back round off the pad."),
-    ("Walking Lunge", "Quads", ["Glutes", "Hamstrings"], Equipment.DUMBBELL,
-     "Long stride. Back knee tracks down, not forward."),
-    ("Seated Calf Raise", "Calves", ["Soleus"], Equipment.MACHINE,
-     "Full stretch at the bottom, one-second squeeze at the top."),
-    ("Incline Dumbbell Press", "Upper chest", ["Shoulders", "Triceps"], Equipment.DUMBBELL,
-     "30° incline, controlled lowering."),
-    ("Seated Cable Row", "Lats", ["Rhomboids", "Biceps"], Equipment.CABLE,
-     "Chest tall. Drive the elbows past your ribs."),
-    ("Dumbbell Shoulder Press", "Shoulders", ["Triceps"], Equipment.DUMBBELL,
-     "Ribs down. Do not arch the lower back to finish the rep."),
-    ("Lat Pulldown", "Lats", ["Biceps"], Equipment.CABLE,
-     "Pull to the collarbone, not behind the neck."),
-    ("Tricep Pushdown", "Triceps", [], Equipment.CABLE,
-     "Elbows pinned to your sides throughout."),
-    ("Conventional Deadlift", "Posterior chain", ["Glutes", "Lats"], Equipment.BARBELL,
-     "Brace the core, flat back throughout."),
-    ("Dumbbell Bench Press", "Chest", ["Triceps", "Shoulders"], Equipment.DUMBBELL,
-     "Wrists stacked over elbows at the bottom."),
-    ("Bulgarian Split Squat", "Quads", ["Glutes"], Equipment.DUMBBELL,
-     "Front shin near vertical. Weight through the mid-foot."),
-    ("Dumbbell Row", "Lats", ["Rhomboids", "Biceps"], Equipment.DUMBBELL,
-     "Row to the hip, not the armpit."),
-    ("Plank", "Core", ["Shoulders"], Equipment.BODYWEIGHT,
-     "Squeeze glutes. A straight line from ear to ankle."),
-    ("Hip Thrust", "Glutes", ["Hamstrings"], Equipment.BARBELL,
-     "Chin tucked. Finish with the hips level, not hyperextended."),
-    ("Dumbbell Lateral Raise", "Shoulders", [], Equipment.DUMBBELL,
-     "Lead with the elbow. Stop at shoulder height."),
-    ("Push-Up", "Chest", ["Triceps", "Core"], Equipment.BODYWEIGHT,
-     "Body moves as one piece. Hips do not sag."),
-    ("Face Pull", "Rear delts", ["Rotator cuff"], Equipment.CABLE,
-     "Pull to the forehead, thumbs back at the finish."),
-    ("Leg Curl", "Hamstrings", [], Equipment.MACHINE,
-     "Hips stay down on the pad the whole set."),
-]
+# The exercise library itself no longer lives here — see app.data.exercise_library
+# for the full 214-movement catalogue (all 22 muscle groups, every equipment
+# type) and app.services.exercise_import.sync_catalog for how it's loaded.
+# WORKOUT_DAY_TEMPLATES below references movements by name; every name it uses
+# exists in that catalogue with identical spelling, since the templates were
+# written against it directly.
 
 TESTIMONIALS = [
     ("Sandra T.", "Level 1 Client", 5, 8,
@@ -315,8 +276,8 @@ WORKOUT_DAY_TEMPLATES = [
             ("Dumbbell Bench Press", 3, "8-10", 90, 9),
             ("Bulgarian Split Squat", 3, "8-10 ea", 75, 9),
             ("Dumbbell Row", 3, "10-12", 60, 11),
-            ("Hip Thrust", 3, "10-12", 75, 11),
-            ("Push-Up", 3, "AMRAP", 60, 14),
+            ("Barbell Hip Thrust", 3, "10-12", 75, 11),
+            ("Push Up", 3, "AMRAP", 60, 14),
         ],
     },
 ]
@@ -438,27 +399,31 @@ async def seed_catalog(db: AsyncSession) -> None:
             continue
         db.add(Program(**data, sort_order=index, is_active=True, is_accepting_clients=True))
 
-    for name, target, secondary, equipment, cue in EXERCISES:
-        slug = slugify(name)
-        if await _exists(db, Exercise, slug=slug):
-            continue
-        db.add(
-            Exercise(
-                slug=slug,
-                name=name,
-                muscle_group="General",
-                target_muscle=target,
-                secondary_muscles=secondary,
-                equipment=equipment,
-                mechanics="Compound",
-                force_type="Push/Pull",
-                coaching_cue=cue,
-                video_url=f"{VIDEO_BASE}/{slug}",
-                source_url=f"{VIDEO_BASE}/{slug}",
-                min_level=TrainingLevel.LEVEL_1,
-                popularity=5,
-            )
-        )
+    # The exercise library comes from the shipped catalogue in
+    # app.data.exercise_library, not from a list in this file.
+    #
+    # A hand-rolled loop used to live here, inserting Exercise rows with
+    # string literals for muscle_group/mechanics/force_type — "General",
+    # "Compound", "Push/Pull" — none of which are members of the enums those
+    # columns hold. That was fine for a while because the columns used to be
+    # plain strings; migration 0005 turned them into native Postgres enums and
+    # this loop was never updated to match, so every row it inserted was
+    # invalid the moment it was read back, surfacing as a `LookupError` deep
+    # in SQLAlchemy's result-row processing the next time anything selected
+    # from `exercises` — which is every plan the coach opens.
+    #
+    # `sync_catalog` is idempotent and additive: it inserts what's missing
+    # from `CATALOG` and backfills blank columns on existing rows, but it
+    # never overwrites a video link or classification a coach has since edited
+    # by hand. Safe to call on every startup, on a fresh database or one
+    # that's already partially seeded.
+    catalog_report = await sync_catalog(db)
+    log.info(
+        "seed.catalog_synced",
+        created=catalog_report.created,
+        backfilled=catalog_report.backfilled,
+        unchanged=catalog_report.unchanged,
+    )
 
     for index, (name, level, rating, weeks, quote, metric) in enumerate(TESTIMONIALS):
         if await _exists(db, Testimonial, client_name=name):
