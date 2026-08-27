@@ -75,7 +75,7 @@ from app.services import entitlements
 
 log = get_logger("seed")
 
-COACH_DISPLAY_NAME = "Lisha Chessen"
+COACH_DISPLAY_NAME = "Lisha Chesson"
 DEV_FALLBACK_COACH_PASSWORD = "DevCoach!2026"
 
 PROGRAMS = [

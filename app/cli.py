@@ -81,8 +81,8 @@ async def _create_coach() -> None:
                 User(
                     email=email,
                     hashed_password=hash_password(password),
-                    full_name="Coach Auto",
-                    display_name="Coach Auto",
+                    full_name="Lisha Chesson",
+                    display_name="Lisha Chesson",
                     role=UserRole.ADMIN,
                     is_active=True,
                     is_verified=True,
