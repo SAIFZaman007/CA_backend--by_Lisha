@@ -24,6 +24,10 @@ dependencies = [
     "structlog==26.1.0",
     "python-slugify==8.0.4",
     "httpx>=0.28.1",
+    # Pure-Python PDF generation for client record exports — no system-level
+    # Cairo/Pango dependency the way WeasyPrint or similar would need, which
+    # matters for keeping the Docker image simple.
+    "reportlab==4.4.10",
 ]
 
 [project.optional-dependencies]

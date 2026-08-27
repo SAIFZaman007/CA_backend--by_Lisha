@@ -30,6 +30,7 @@ class ProgramOut(BaseModel):
     description: str
     features: list[str]
     best_for: str | None = None
+    image_url: str | None = None
     is_accepting_clients: bool
     sort_order: int
 
@@ -67,12 +68,6 @@ class ExerciseCreate(BaseModel):
     equipment: Equipment = Equipment.OTHER
     mechanics: Mechanics | None = None
     force_type: ForceType | None = None
-    # Required on create, unlike the nullable column behind it.
-    #
-    # The database stays permissive so a coach can save a half-finished
-    # movement from a script or a fixture; the API is strict so a movement
-    # cannot enter the library through the dashboard without a demonstration
-    # and then silently fail a plan save weeks later.
     video_url: HttpUrl
     thumbnail_url: HttpUrl | None = None
     source_url: HttpUrl | None = None
@@ -101,7 +96,8 @@ class ExerciseUpdate(BaseModel):
 
 
 class FacetOption(BaseModel):
-    """One heading in the coach's picker, with how much sits under it.
+    """
+    One heading in the coach's picker, with how much sits under it.
 
     The count is not decoration. A coach opening "Palmar Fascia" and finding
     four movements has different expectations from one opening "Chest" and
@@ -153,8 +149,6 @@ class LinkCheckRow(BaseModel):
     exercise_id: str
     name: str
     url: str
-    # None when the request never got a response at all — a timeout or a DNS
-    # failure — which is a different problem from a 404 and needs saying so.
     status: int | None = None
     error: str | None = None
 

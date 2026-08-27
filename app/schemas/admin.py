@@ -1,4 +1,5 @@
-"""Payloads for the admin dashboard.
+"""
+Payloads for the admin dashboard.
 
 The dashboard is the only surface that can read another person's record, so the
 read models here are deliberately explicit about what leaves the database.
@@ -7,7 +8,15 @@ read models here are deliberately explicit about what leaves the database.
 import uuid
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 from app.models.enums import (
     ActivityLevel,
@@ -457,12 +466,27 @@ class ThreadSummary(BaseModel):
     last_message_at: datetime | None = None
     preview: str | None = None
     unread: int = 0
-    # So the list can show a paperclip on a message that is only a photo.
     has_attachments: bool = False
 
 
 class MessageIn(BaseModel):
-    body: str = Field(min_length=1, max_length=5000)
+    body: str = Field(default="", max_length=5000)
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "MessageIn":
+        if not self.body.strip() and not self.attachment_ids:
+            raise ValueError("Write something, or attach an image.")
+        return self
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        seen: list[uuid.UUID] = []
+        for item in value:
+            if item not in seen:
+                seen.append(item)
+        return seen
 
 
 
