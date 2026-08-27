@@ -1,4 +1,5 @@
-"""The client roster and one client's whole record.
+"""
+The client roster and one client's whole record.
 
 `GET /admin/clients/{id}` deliberately returns everything the coach needs on the
 client screen in one round trip. Six separate requests would render the page in
@@ -7,9 +8,10 @@ six stages and make the dashboard feel slow on a gym wi-fi connection.
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentAdmin, CurrentCoach, DbSession
@@ -35,7 +37,7 @@ from app.schemas.admin import (
     SessionRow,
     SleepRow,
 )
-from app.services import storage
+from app.services import reports, storage
 from app.services.email import send_welcome
 
 router = APIRouter(prefix="/clients")
@@ -654,10 +656,50 @@ async def client_activity(
 
 
 @router.get("/{client_id}/export")
-async def export_client(client_id: uuid.UUID, admin: CurrentAdmin, db: DbSession) -> dict:
-    """Full machine-readable copy of one client's record, for data requests."""
+async def export_client(
+    client_id: uuid.UUID,
+    admin: CurrentAdmin,
+    db: DbSession,
+    format: Literal["csv", "pdf", "json"] = Query(
+        "csv",
+        description="`csv` and `pdf` are the two the dashboard's export button offers — a "
+        "real file a coach can open or hand to someone. `json` is kept for genuine "
+        "data-portability requests (GDPR/CCPA-style 'send me everything'), where a "
+        "complete machine-readable copy is what is actually wanted.",
+    ),
+) -> Response:
+    """
+    One client's record, for download.
+
+    `csv` and `pdf` are built from the same `ClientDetail` the dashboard's own
+    client screen renders, in `app.services.reports` — so what a coach
+    downloads can never show different numbers than what the screen showed
+    when they clicked the button. `json` short-circuits to the old plain
+    dict-as-JSON response, which FastAPI serialises for us automatically.
+    """
     detail = await client_detail(client_id, admin, db, days=730)
-    return {
-        "exported_at": datetime.now(UTC).isoformat(),
-        "record": detail.model_dump(mode="json"),
-    }
+
+    if format == "json":
+        return JSONResponse(
+            {
+                "exported_at": datetime.now(UTC).isoformat(),
+                "record": detail.model_dump(mode="json"),
+            }
+        )
+
+    stem = reports.build_filename_stem(detail)
+    if format == "csv":
+        body = reports.build_client_csv(detail)
+        media_type = "text/csv"
+        filename = f"{stem}.csv"
+    else:
+        body = reports.build_client_pdf(detail)
+        media_type = "application/pdf"
+        filename = f"{stem}.pdf"
+
+    log.info("admin.client_exported", client_id=str(client_id), format=format, by=str(admin.id))
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -1,4 +1,5 @@
-"""What the business sells and what it teaches.
+"""
+What the business sells and what it teaches.
 
 One person runs Coach Auto: they coach and they administer. Splitting pricing
 behind a separate admin role meant the only human who works here could not edit
@@ -19,10 +20,9 @@ from sqlalchemy import func, or_, select
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
 from app.models.catalog import Program
-from app.models.enums import Equipment, TrainingLevel, TutorialCategory
+from app.models.enums import Equipment, TrainingLevel, TutorialCategory, VideoProvider
 from app.models.media import VideoTutorial
 from app.models.training import WorkoutPlan
-from app.services import storage
 from app.schemas.admin import ProgramAdminOut, ProgramIn, ProgramUpdate
 from app.schemas.media import (
     TutorialAdminOut,
@@ -31,6 +31,7 @@ from app.schemas.media import (
     default_thumbnail,
     detect_provider,
 )
+from app.services import storage
 
 router = APIRouter()
 log = get_logger("admin.catalog")
@@ -39,7 +40,9 @@ log = get_logger("admin.catalog")
 def _image_url(program: Program) -> str | None:
     """Whichever artwork the coach supplied: an upload wins over a pasted link."""
     if program.image_key:
-        return f"/api/v1/public/programs/{program.id}/image"
+        # See the comment on `upload_program_image`'s return value — the real
+        # route has no `/public` segment.
+        return f"/api/v1/programs/{program.id}/image"
     return program.image_external_url
 
 
@@ -233,12 +236,12 @@ async def create_tutorial(
     payload: TutorialCreate, coach: CurrentCoach, db: DbSession
 ) -> VideoTutorial:
     data = payload.model_dump()
-    video_url = str(payload.video_url)
+    video_url = str(payload.video_url) if payload.video_url is not None else None
 
     tutorial = VideoTutorial(
         slug=await _unique_slug(db, VideoTutorial, payload.title),
         created_by_id=coach.id,
-        provider=detect_provider(video_url),
+        provider=detect_provider(video_url) if video_url is not None else VideoProvider.DIRECT,
         **{
             **data,
             "video_url": video_url,
@@ -328,8 +331,6 @@ async def upload_program_image(
     key, size = await storage.save_program_image(program_id, file)
 
     program.image_key = key
-    # An upload wins over a previously pasted link, so the tier has one answer
-    # for "which picture is this?" rather than two competing ones.
     program.image_external_url = None
     await db.flush()
 
@@ -337,7 +338,8 @@ async def upload_program_image(
         storage.delete_file(previous)
 
     log.info("admin.program_image_uploaded", program_id=str(program_id), bytes=size)
-    return {"image_url": f"/api/v1/public/programs/{program_id}/image"}
+
+    return {"image_url": f"/api/v1/programs/{program_id}/image"}
 
 
 @router.post("/tutorials/upload", status_code=status.HTTP_201_CREATED)

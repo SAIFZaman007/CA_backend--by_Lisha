@@ -6,19 +6,19 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
+from app.api.v1.endpoints.messages import claim_attachments, serialise_attachment
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
-from app.api.v1.endpoints.messages import serialise_attachment
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
 from app.models.enums import BookingStatus, LeadStatus
 from app.models.user import User
 from app.schemas.admin import (
     BookingOut,
-    ThreadAttachment,
     BookingUpdate,
     LeadOut,
     LeadUpdate,
     MessageIn,
+    ThreadAttachment,
     ThreadMessage,
     ThreadOut,
     ThreadSummary,
@@ -35,7 +35,8 @@ PREVIEW_CHARS = 120
 
 @router.get("/unread-count")
 async def unread_count(coach: CurrentCoach, db: DbSession) -> dict[str, int]:
-    """How many client messages are waiting on a reply.
+    """
+    How many client messages are waiting on a reply.
 
     Its own tiny endpoint so the sidebar badge can poll every few seconds
     without dragging the whole overview payload — counts and dashboards want
@@ -130,8 +131,10 @@ async def _thread_for_client(db: DbSession, client_id: uuid.UUID, coach_id: uuid
 async def read_thread(
     client_id: uuid.UUID, coach: CurrentCoach, db: DbSession
 ) -> ThreadOut:
-    """Opening a thread marks the client's messages as read — that is what the
-    unread badge means, and it should not need a second click."""
+    """
+    Opening a thread marks the client's messages as read — that is what the
+    unread badge means, and it should not need a second click.
+    """
     client = await db.get(User, client_id)
     if client is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That client was not found.")
@@ -182,6 +185,14 @@ async def reply(
 
     message = Message(thread_id=thread.id, sender_id=coach.id, body=payload.body.strip())
     db.add(message)
+    await db.flush()
+
+    attachments = await claim_attachments(
+        db,
+        attachment_ids=payload.attachment_ids,
+        owner_id=coach.id,
+        message_id=message.id,
+    )
     thread.last_message_at = datetime.now(UTC)
     await db.flush()
 
@@ -192,7 +203,12 @@ async def reply(
         created_at=message.created_at,
         read_at=None,
         from_coach=True,
-        attachments=[],
+        attachments=[
+            ThreadAttachment(
+                **serialise_attachment(attachment, coach.id).model_dump(exclude={"kind"})
+            )
+            for attachment in attachments
+        ],
     )
 
 

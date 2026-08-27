@@ -10,6 +10,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
@@ -17,7 +18,6 @@ from app.models.catalog import Exercise
 from app.models.nutrition import Meal, MealItem, MealPlan
 from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan
 from app.models.user import User
-from app.services.programming import assert_every_movement_has_video
 from app.schemas.admin import (
     MealOut,
     MealPlanIn,
@@ -27,6 +27,7 @@ from app.schemas.admin import (
     WorkoutPlanIn,
     WorkoutPlanOut,
 )
+from app.services.programming import assert_every_movement_has_video
 
 router = APIRouter()
 log = get_logger("admin.programming")
@@ -40,7 +41,8 @@ async def _require_client(db: DbSession, client_id: uuid.UUID) -> User:
 
 
 def _plan_out(plan: WorkoutPlan, video_index: dict | None = None) -> WorkoutPlanOut:
-    """Serialise a plan, resolving each prescription's demonstration video.
+    """
+    Serialise a plan, resolving each prescription's demonstration video.
 
     `video_index` is the map `assert_every_movement_has_video` already built
     during a write; passing it through avoids rebuilding it. On a plain read it
@@ -96,13 +98,11 @@ def _plan_out(plan: WorkoutPlan, video_index: dict | None = None) -> WorkoutPlan
 
 
 async def _write_days(db: DbSession, plan: WorkoutPlan, payload: WorkoutPlanIn) -> None:
-    """Rebuild the day/exercise tree under a plan. Every referenced movement is
+    """
+    Rebuild the day/exercise tree under a plan. Every referenced movement is
     verified first, so a bad ID fails the whole save rather than silently
-    dropping an exercise out of the client's programme."""
-    # The rule a client's programme depends on: every prescribed movement must
-    # resolve to a demonstration they can watch. Enforced here rather than in
-    # the dashboard, because the API is the boundary — a plan written by a
-    # script or a replayed request would walk straight past a front-end check.
+    dropping an exercise out of the client's programme.
+    """
     prescriptions = [
         (item.exercise_id, item.video_url) for day in payload.days for item in day.exercises
     ]
@@ -123,8 +123,22 @@ async def _write_days(db: DbSession, plan: WorkoutPlan, payload: WorkoutPlanIn) 
                 detail="One of the movements in this plan no longer exists. Refresh and retry.",
             )
 
-    for day in list(plan.days):
-        await db.delete(day)
+    # A bulk, awaited DELETE rather than `for day in plan.days: db.delete(day)`.
+    #
+    # `plan` arrives here either freshly constructed (create_plan, never
+    # persisted before this request) or fetched with a bare `db.get()`
+    # (replace_plan) — neither actually populates the `days` collection, even
+    # though the relationship is declared `lazy="selectin"`. That setting
+    # governs how a *query result* is loaded; it does not retroactively load a
+    # collection on an object that was never the result of one. Touching
+    # `plan.days` here — reading it to loop, or assigning to it — makes
+    # SQLAlchemy try to lazy-load it, and under AsyncSession a lazy-load
+    # outside an awaited call raises `MissingGreenlet` (this crashed both
+    # `create_plan` and `replace_plan` in practice). A plain SQL DELETE, fully
+    # awaited, sidesteps the collection entirely — it is a no-op on a brand
+    # new plan and removes every existing day in one statement otherwise.
+    # `WorkoutDayExercise` rows cascade with it at the database level.
+    await db.execute(WorkoutDay.__table__.delete().where(WorkoutDay.plan_id == plan.id))
     await db.flush()
 
     for day_index, day_in in enumerate(payload.days):
@@ -261,6 +275,10 @@ async def activate_plan(
     plan.is_active = True
     await _deactivate_other_plans(db, plan.client_id, plan.id)
     await db.flush()
+    # `plan.days` has never been loaded on this fetch — `_plan_out` reads it,
+    # so it has to be populated through an awaited call first. Same reasoning
+    # as the comment in `_write_days`.
+    await db.refresh(plan, ["days"])
     return _plan_out(plan)
 
 
@@ -270,7 +288,21 @@ async def duplicate_plan(
 ) -> WorkoutPlanOut:
     """Next week's block usually starts as last week's block. This is how a coach
     progresses someone without retyping fourteen exercises."""
-    source = await db.get(WorkoutPlan, plan_id)
+    # `selectinload` here, not a bare `db.get()`: the loop below reads
+    # `source.days` (and each day's `.exercises`), and neither is populated by
+    # a plain fetch even though both relationships declare `lazy="selectin"` —
+    # that setting only takes effect through a query SQLAlchemy issues itself,
+    # which `db.get()` on an id it does not already have cached does not
+    # trigger for nested collections. Asking for it explicitly here avoids the
+    # `MissingGreenlet` crash the same unguarded pattern caused elsewhere in
+    # this file (see the comment in `_write_days`).
+    source = (
+        await db.execute(
+            select(WorkoutPlan)
+            .where(WorkoutPlan.id == plan_id)
+            .options(selectinload(WorkoutPlan.days).selectinload(WorkoutDay.exercises))
+        )
+    ).scalar_one_or_none()
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That plan was not found.")
 
@@ -317,7 +349,19 @@ async def duplicate_plan(
             )
 
     await db.flush()
-    await db.refresh(copy, ["days"])
+    # `db.refresh(copy, ["days"])` only repopulates the top-level `days`
+    # collection — it does not cascade into each day's nested `exercises`,
+    # which `_plan_out` also reads. A second, explicit `selectinload` fetch is
+    # what actually eager-loads two levels deep; refresh alone left
+    # `day.exercises` unloaded and `_plan_out` crashed on it the same way
+    # `duplicate_plan`'s own read of `source.days` did before it was fixed.
+    copy = (
+        await db.execute(
+            select(WorkoutPlan)
+            .where(WorkoutPlan.id == copy.id)
+            .options(selectinload(WorkoutPlan.days).selectinload(WorkoutDay.exercises))
+        )
+    ).scalar_one()
     return _plan_out(copy)
 
 
@@ -366,8 +410,13 @@ def _meal_plan_out(plan: MealPlan) -> MealPlanOut:
 
 
 async def _write_meals(db: DbSession, plan: MealPlan, payload: MealPlanIn) -> None:
-    for meal in list(plan.meals):
-        await db.delete(meal)
+    # Bulk, awaited DELETE — not a walk over `plan.meals`. Same reasoning as
+    # `_write_days`: `plan` here is either brand new or fetched with a bare
+    # `db.get()`, so the collection is never actually loaded despite
+    # `lazy="selectin"`, and touching it synchronously raises `MissingGreenlet`
+    # under AsyncSession. `MealItem` rows cascade with their `Meal` at the
+    # database level.
+    await db.execute(Meal.__table__.delete().where(Meal.plan_id == plan.id))
     await db.flush()
 
     per_day: dict[int, int] = {}
@@ -500,6 +549,10 @@ async def activate_meal_plan(
         .values(is_active=False)
     )
     await db.flush()
+    # `plan.meals` was never loaded on this fetch — `_meal_plan_out` reads it,
+    # so populate it through an awaited call first. Same reasoning as
+    # `_write_meals` and `activate_plan` above.
+    await db.refresh(plan, ["meals"])
     return _meal_plan_out(plan)
 
 
