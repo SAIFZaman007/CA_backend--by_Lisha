@@ -38,55 +38,71 @@ depends_on: str | Sequence[str] | None = None
 
 
 MUSCLE_GROUPS = (
-    "abductors",
-    "abs",
-    "adductors",
-    "biceps",
-    "calves",
-    "chest",
-    "forearms",
-    "glutes",
-    "hamstrings",
-    "hip_flexors",
-    "it_band",
-    "lats",
-    "lower_back",
-    "upper_back",
-    "neck",
-    "obliques",
-    "palmar_fascia",
-    "plantar_fascia",
-    "quads",
-    "shoulders",
-    "traps",
-    "triceps",
+    "ABDUCTORS",
+    "ABS",
+    "ADDUCTORS",
+    "BICEPS",
+    "CALVES",
+    "CHEST",
+    "FOREARMS",
+    "GLUTES",
+    "HAMSTRINGS",
+    "HIP_FLEXORS",
+    "IT_BAND",
+    "LATS",
+    "LOWER_BACK",
+    "UPPER_BACK",
+    "NECK",
+    "OBLIQUES",
+    "PALMAR_FASCIA",
+    "PLANTAR_FASCIA",
+    "QUADS",
+    "SHOULDERS",
+    "TRAPS",
+    "TRICEPS",
 )
 
+# `equipment` is a native enum created back in 0001 using upper-case member
+# names (`sa.Enum(PyEnum)` serializes `.name`, not `.value`, unless
+# `values_callable` says otherwise — nothing in this codebase does). These ten
+# new labels have to match that existing convention or every row written with
+# one of them becomes unreadable the same way `muscle_group` broke below.
 NEW_EQUIPMENT = (
-    "ez_bar",
-    "smith_machine",
-    "medicine_ball",
-    "weight_plate",
-    "trap_bar",
-    "suspension",
-    "stretch",
-    "foam_roller",
-    "sled",
-    "cardio_machine",
+    "EZ_BAR",
+    "SMITH_MACHINE",
+    "MEDICINE_BALL",
+    "WEIGHT_PLATE",
+    "TRAP_BAR",
+    "SUSPENSION",
+    "STRETCH",
+    "FOAM_ROLLER",
+    "SLED",
+    "CARDIO_MACHINE",
 )
 
-MECHANICS = ("compound", "isolation", "static")
-FORCE_TYPES = ("push", "pull", "static", "hinge", "squat", "carry")
+# NOTE: these four enums must use upper-case member names, matching the
+# convention every other native enum in this schema follows (see 0001-0003).
+# SQLAlchemy's `Enum(SomePyEnum)` column type stores the Python member's
+# `.name` on write and looks values back up by `.name` on read — it never
+# touches `.value` unless the column is declared with `values_callable`,
+# which nothing here does. An earlier version of this migration created
+# these four types (and backfilled `muscle_group`) using the lower-case
+# `.value` strings instead, which matched the type at CREATE TIME but not
+# what the ORM actually reads/writes — every row is a `LookupError` waiting
+# to happen on the first SELECT. Fixed here before this migration is ever
+# applied anywhere that matters.
+MECHANICS = ("COMPOUND", "ISOLATION", "STATIC")
+FORCE_TYPES = ("PUSH", "PULL", "STATIC", "HINGE", "SQUAT", "CARRY")
 GALLERY_CATEGORIES = (
-    "transformations",
-    "coaching",
-    "competition",
-    "gym",
-    "certifications",
-    "community",
-    "behind_the_scenes",
+    "TRANSFORMATIONS",
+    "COACHING",
+    "COMPETITION",
+    "GYM",
+    "CERTIFICATIONS",
+    "COMMUNITY",
+    "BEHIND_THE_SCENES",
 )
-ATTACHMENT_KINDS = ("image",)
+ATTACHMENT_KINDS = ("IMAGE",)
 
 
 def upgrade() -> None:
@@ -134,7 +150,7 @@ def upgrade() -> None:
 
     # Best-effort classification of whatever is already in the library, by
     # matching the free-text label that has been carrying this meaning until
-    # now. Anything unrecognised lands in `abs` and is re-filed correctly the
+    # now. Anything unrecognised lands in `ABS` and is re-filed correctly the
     # first time `POST /admin/exercises/sync` runs.
     # Every branch of this CASE is a string literal, so Postgres infers the
     # expression's type as `text`. The column it is being assigned to is the
@@ -142,38 +158,41 @@ def upgrade() -> None:
     # text -> enum even though every literal here is a valid member of it —
     # that gap is exactly what raised `DatatypeMismatchError` on first run.
     # The `::muscle_group` cast on the CASE result closes it explicitly.
+    # Literals here are upper-case member names (`QUADS`, not `quads`) to
+    # match how `MUSCLE_GROUPS` above defines the type, and how SQLAlchemy's
+    # `Enum(MuscleGroup)` column actually reads/writes it.
     op.execute(
         """
         UPDATE exercises SET muscle_group = (CASE
-            WHEN target_muscle ILIKE '%quad%'        THEN 'quads'
-            WHEN target_muscle ILIKE '%hamstring%'   THEN 'hamstrings'
-            WHEN target_muscle ILIKE '%glute%'       THEN 'glutes'
+            WHEN target_muscle ILIKE '%quad%'        THEN 'QUADS'
+            WHEN target_muscle ILIKE '%hamstring%'   THEN 'HAMSTRINGS'
+            WHEN target_muscle ILIKE '%glute%'       THEN 'GLUTES'
             WHEN target_muscle ILIKE '%calf%'
               OR target_muscle ILIKE '%calve%'
-              OR target_muscle ILIKE '%soleus%'      THEN 'calves'
-            WHEN target_muscle ILIKE '%chest%'       THEN 'chest'
+              OR target_muscle ILIKE '%soleus%'      THEN 'CALVES'
+            WHEN target_muscle ILIKE '%chest%'       THEN 'CHEST'
             WHEN target_muscle ILIKE '%lat%'
-              OR target_muscle ILIKE '%posterior chain%' THEN 'lats'
+              OR target_muscle ILIKE '%posterior chain%' THEN 'LATS'
             WHEN target_muscle ILIKE '%rear delt%'
               OR target_muscle ILIKE '%rhomboid%'
-              OR target_muscle ILIKE '%mid back%'    THEN 'upper_back'
+              OR target_muscle ILIKE '%mid back%'    THEN 'UPPER_BACK'
             WHEN target_muscle ILIKE '%lower back%'
-              OR target_muscle ILIKE '%erector%'     THEN 'lower_back'
+              OR target_muscle ILIKE '%erector%'     THEN 'LOWER_BACK'
             WHEN target_muscle ILIKE '%shoulder%'
-              OR target_muscle ILIKE '%delt%'        THEN 'shoulders'
-            WHEN target_muscle ILIKE '%bicep%'       THEN 'biceps'
-            WHEN target_muscle ILIKE '%tricep%'      THEN 'triceps'
-            WHEN target_muscle ILIKE '%trap%'        THEN 'traps'
+              OR target_muscle ILIKE '%delt%'        THEN 'SHOULDERS'
+            WHEN target_muscle ILIKE '%bicep%'       THEN 'BICEPS'
+            WHEN target_muscle ILIKE '%tricep%'      THEN 'TRICEPS'
+            WHEN target_muscle ILIKE '%trap%'        THEN 'TRAPS'
             WHEN target_muscle ILIKE '%forearm%'
               OR target_muscle ILIKE '%grip%'
-              OR target_muscle ILIKE '%wrist%'       THEN 'forearms'
-            WHEN target_muscle ILIKE '%oblique%'     THEN 'obliques'
-            WHEN target_muscle ILIKE '%neck%'        THEN 'neck'
-            WHEN target_muscle ILIKE '%adductor%'    THEN 'adductors'
-            WHEN target_muscle ILIKE '%abductor%'    THEN 'abductors'
+              OR target_muscle ILIKE '%wrist%'       THEN 'FOREARMS'
+            WHEN target_muscle ILIKE '%oblique%'     THEN 'OBLIQUES'
+            WHEN target_muscle ILIKE '%neck%'        THEN 'NECK'
+            WHEN target_muscle ILIKE '%adductor%'    THEN 'ADDUCTORS'
+            WHEN target_muscle ILIKE '%abductor%'    THEN 'ABDUCTORS'
             WHEN target_muscle ILIKE '%hip flexor%'
-              OR target_muscle ILIKE '%psoas%'       THEN 'hip_flexors'
-            ELSE 'abs'
+              OR target_muscle ILIKE '%psoas%'       THEN 'HIP_FLEXORS'
+            ELSE 'ABS'
         END)::muscle_group
         WHERE muscle_group IS NULL
         """

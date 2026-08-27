@@ -141,7 +141,7 @@ class Settings(BaseSettings):
 
     # --- Seeding ------------------------------------------------------------
     SEED_ON_STARTUP: bool = False
-    COACH_EMAIL: str = "lisha.chessen@coach-auto.org"
+    COACH_EMAIL: str = "lisha.chesson@coach-auto.org"
     # The one real credential seeding can create. Read by app/services/seed.py
     # — never hardcode this anywhere else. Required to seed the coach account
     # in production; outside production a dev-only fallback is used instead
