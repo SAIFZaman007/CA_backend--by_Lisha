@@ -221,7 +221,7 @@ async def get_photo_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found.")
 
     return FileResponse(
-        storage.resolve_path(photo.file_key),
+        storage.resolve_path(photo.file_key, not_found_message="Photo not found."),
         media_type=photo.content_type,
         headers={"Cache-Control": "private, max-age=3600", "X-Robots-Tag": "noindex, noimageindex"},
     )

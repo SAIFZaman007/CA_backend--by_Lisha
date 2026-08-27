@@ -176,7 +176,7 @@ async def stream_tutorial(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
 
     return FileResponse(
-        storage.resolve_path(tutorial.file_key),
+        storage.resolve_path(tutorial.file_key, not_found_message="That video could not be found."),
         media_type="video/mp4",
         headers={"Cache-Control": "private, max-age=900", "Accept-Ranges": "bytes"},
     )

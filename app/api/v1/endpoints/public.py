@@ -160,7 +160,7 @@ async def program_image(program_id: uuid.UUID, db: DbSession) -> FileResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No image for that plan.")
 
     return FileResponse(
-        storage.resolve_path(program.image_key),
+        storage.resolve_path(program.image_key, not_found_message="No image for that plan."),
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )

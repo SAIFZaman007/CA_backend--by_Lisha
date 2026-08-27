@@ -168,7 +168,7 @@ async def gallery_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
 
     return FileResponse(
-        storage.resolve_path(image.image_key),
+        storage.resolve_path(image.image_key, not_found_message="That image was not found."),
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
