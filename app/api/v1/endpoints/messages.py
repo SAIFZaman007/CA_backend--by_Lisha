@@ -1,17 +1,8 @@
-"""Coach ↔ client messaging.
+"""
+Coach ↔ client messaging.
 
 A client has exactly one thread with their coach. Clients who want a live call
 book a slot through the consultation endpoint instead.
-
-**Attachments.** A client can send images — a loaded bar, a meal, their setup
-mid-set — so a form question does not need three paragraphs of description.
-Bytes go up on their own request first and the message that references them is
-written second. Two reasons: a slow upload does not block the text box, and a
-validation failure on the message never costs anyone a re-upload.
-
-The images are private client data and are served exactly as check-in photos
-are: never as static files, only through a short-lived signature bound to one
-attachment and one viewer.
 """
 
 import uuid
@@ -93,7 +84,8 @@ async def _thread_for(db: DbSession, user: User) -> MessageThread:
 
 
 def attachment_url(attachment: MessageAttachment, viewer_id: uuid.UUID) -> str:
-    """A URL an <img> tag can actually load.
+    """
+    A URL an <img> tag can actually load.
 
     The file endpoint accepts either a bearer token or this signature, so the
     same route serves a scripted fetch and a plain image tag. The signature is
@@ -119,16 +111,30 @@ def serialise_attachment(
     )
 
 
-def serialise_message(message: Message, viewer_id: uuid.UUID) -> MessageOut:
+def serialise_message(
+    message: Message,
+    viewer_id: uuid.UUID,
+    *,
+    attachments: list[MessageAttachment] | None = None,
+) -> MessageOut:
+    """
+    `attachments` can be passed explicitly for a message just created in
+    this same request, where the ones just claimed are already known in
+    Python and reading `message.attachments` would trigger an unsafe
+    synchronous lazy-load (see the long comment in `send_message`). Reads of
+    an existing message — `my_thread`, where `MessageThread.messages` was
+    eager-loaded through `selectinload` — pass nothing and fall back to the
+    relationship, which is safe there because it was populated by an awaited
+    query already.
+    """
+    source = message.attachments if attachments is None else attachments
     return MessageOut(
         id=message.id,
         sender_id=message.sender_id,
         body=message.body,
         read_at=message.read_at,
         created_at=message.created_at,
-        attachments=[
-            serialise_attachment(attachment, viewer_id) for attachment in message.attachments
-        ],
+        attachments=[serialise_attachment(attachment, viewer_id) for attachment in source],
     )
 
 
@@ -173,7 +179,8 @@ async def unread_count(user: CurrentUser, db: DbSession) -> dict[str, int]:
 
 
 async def _purge_orphans(db: DbSession, owner_id: uuid.UUID) -> None:
-    """Delete this uploader's stale unbound attachments.
+    """
+    Delete this uploader's stale unbound attachments.
 
     Swept opportunistically on each upload rather than by a scheduled job. The
     platform runs a single worker with no task queue, and the only account that
@@ -209,13 +216,15 @@ async def upload_attachment(
     db: DbSession,
     file: UploadFile = File(...),
 ) -> AttachmentUploadOut:
-    """Upload one image, unattached. Send it with the next message."""
-    if user.role in (UserRole.COACH, UserRole.ADMIN):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Coaches attach images from the coach dashboard.",
-        )
+    """Upload one image, unattached. Send it with the next message.
 
+    Both a client and a coach reach this endpoint. The image itself is stored
+    identically either way — same validation, same downscaling, same private,
+    signed-URL serving — only the thread it eventually lands in differs, and
+    that is resolved separately when the message is sent (`claim_attachments`
+    in this module for a client, or the coach's own reply endpoint in
+    `app.api.v1.endpoints.admin.inbox`).
+    """
     await _purge_orphans(db, user.id)
 
     key, content_type, size, width, height = await storage.save_message_image(user.id, file)
@@ -239,6 +248,7 @@ async def upload_attachment(
     log.info("message.attachment_uploaded", user_id=str(user.id), bytes=size)
     return AttachmentUploadOut(
         id=attachment.id,
+        kind=attachment.kind,
         url=attachment_url(attachment, user.id),
         content_type=content_type,
         file_size_bytes=size,
@@ -302,10 +312,6 @@ async def attachment_file(
         permitted = attachment.uploaded_by_id == viewer_id
     else:
         # Sent. Visible to both sides of the conversation it landed in.
-        #
-        # Resolving the thread rather than trusting the signature is what stops
-        # a leaked link outliving the relationship it was issued inside: when
-        # the thread goes, so does the access.
         permitted = bool(
             (
                 await db.execute(
@@ -400,5 +406,4 @@ async def send_message(payload: MessageIn, user: CurrentUser, db: DbSession) -> 
     thread.last_message_at = datetime.now(UTC)
     await db.flush()
 
-    message.attachments = attachments
-    return serialise_message(message, user.id)
+    return serialise_message(message, user.id, attachments=attachments)

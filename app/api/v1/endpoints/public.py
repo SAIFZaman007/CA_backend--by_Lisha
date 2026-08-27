@@ -20,8 +20,8 @@ from app.core.deps import DbSession, OptionalUser
 from app.core.logging import get_logger
 from app.core.rate_limit import limiter
 from app.models.catalog import Program, Testimonial
-from app.models.gallery import GalleryImage
 from app.models.engagement import ConsultationBooking, Lead
+from app.models.gallery import GalleryImage
 from app.schemas.catalog import ProgramOut, TestimonialOut
 from app.schemas.tracking import BookingIn, BookingOut, LeadIn
 from app.services import storage
@@ -43,16 +43,35 @@ async def site_meta() -> dict[str, str]:
     }
 
 
+def _public_image_url(program: Program) -> str | None:
+    """Whichever artwork the coach supplied: an upload wins over a pasted link.
+
+    Mirrors `_image_url` in `app.api.v1.endpoints.admin.catalog` — kept as a
+    separate function rather than a shared import because the two live in
+    different routers with different purposes, but the resolution rule (and
+    the route it points at) must stay identical between them, or one side
+    shows artwork the other 404s on.
+    """
+    if program.image_key:
+        return f"/api/v1/programs/{program.id}/image"
+    return program.image_external_url
+
+
 @router.get("/programs", response_model=list[ProgramOut])
-async def list_programs(db: DbSession) -> list[Program]:
+async def list_programs(db: DbSession) -> list[ProgramOut]:
     result = await db.execute(
         select(Program).where(Program.is_active.is_(True)).order_by(Program.sort_order)
     )
-    return list(result.scalars().all())
+    return [
+        ProgramOut.model_validate(program).model_copy(
+            update={"image_url": _public_image_url(program)}
+        )
+        for program in result.scalars().all()
+    ]
 
 
 @router.get("/programs/{slug}", response_model=ProgramOut)
-async def get_program(slug: str, db: DbSession) -> Program:
+async def get_program(slug: str, db: DbSession) -> ProgramOut:
     program = (
         await db.execute(
             select(Program).where(Program.slug == slug, Program.is_active.is_(True))
@@ -60,7 +79,9 @@ async def get_program(slug: str, db: DbSession) -> Program:
     ).scalar_one_or_none()
     if program is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That programme does not exist.")
-    return program
+    return ProgramOut.model_validate(program).model_copy(
+        update={"image_url": _public_image_url(program)}
+    )
 
 
 @router.get("/testimonials", response_model=list[TestimonialOut])

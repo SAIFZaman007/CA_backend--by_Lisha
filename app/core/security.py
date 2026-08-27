@@ -55,10 +55,27 @@ def create_access_token(user_id: uuid.UUID | str, role: str) -> str:
     )
 
 
-def create_refresh_token(user_id: uuid.UUID | str) -> tuple[str, datetime]:
+def create_refresh_token(user_id: uuid.UUID | str, audience: str) -> tuple[str, datetime]:
+    """`audience` is either `"staff"` or `"client"` — see `refresh_audience` in
+    `app.api.v1.endpoints.auth`.
+
+    This is the second half of session isolation between the two frontends.
+    The cookie *name* already keeps a client's cookie from physically landing
+    in the coach dashboard's cookie slot (see `REFRESH_COOKIE_NAMES` in
+    `auth.py`), but a cookie name is just a label the browser attaches — it is
+    not cryptographically bound to anything. Embedding the audience inside the
+    signed token itself means that even if a cookie somehow ended up on the
+    wrong path or domain (a misconfigured `COOKIE_DOMAIN` in a future
+    deployment, a proxy that rewrites paths, a browser bug), the token it
+    carries still will not decode as valid for the endpoint reading it. Two
+    independent locks rather than one.
+    """
     expires_at = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     token = _create_token(
-        str(user_id), "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        str(user_id),
+        "refresh",
+        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        aud=audience,
     )
     return token, expires_at
 
@@ -74,9 +91,29 @@ def create_reset_token(user_id: uuid.UUID | str, password_hash: str) -> str:
     )
 
 
-def decode_token(token: str, expected_type: TokenType) -> dict[str, Any] | None:
+def decode_token(
+    token: str, expected_type: TokenType, *, expected_audience: str | None = None
+) -> dict[str, Any] | None:
+    """`expected_audience` matters for more than just filtering afterwards.
+
+    PyJWT treats `aud` as a registered claim: if a token carries one, calling
+    `jwt.decode()` without an explicit `audience=` argument makes PyJWT
+    validate it against *nothing*, which always fails with
+    `InvalidAudienceError` rather than silently ignoring the claim. Refresh
+    tokens carry `aud`; access and reset tokens do not. So this has to either
+    pass the audience through for PyJWT to check, or explicitly turn the
+    check off for token types that were never given one — checking
+    `payload.get("aud")` against `expected_audience` afterwards, as a plain
+    dict comparison, never runs if the decode call above it raises first.
+    """
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            audience=expected_audience,
+            options={"verify_aud": expected_audience is not None},
+        )
     except jwt.PyJWTError:
         return None
     if payload.get("type") != expected_type:
@@ -99,15 +136,6 @@ def generate_secret(length: int = 48) -> str:
 
 
 # --- Signed media URLs --------------------------------------------------------
-#
-# Private images cannot be fetched with a bearer token: a browser <img> tag
-# sends no Authorization header, and the access token lives in memory rather
-# than a cookie by design. Every check-in photo therefore returned 401 and
-# rendered as a broken image.
-#
-# The fix is a short-lived signature in the URL itself. The link works in an
-# <img>, is useless once it expires, is bound to one photo and one viewer, and
-# needs no server-side state to verify.
 
 MEDIA_AUDIENCE = "media"
 

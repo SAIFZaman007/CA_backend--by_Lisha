@@ -8,7 +8,7 @@ stored hashed, so they can be revoked server-side and cannot be read by script.
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -41,32 +41,32 @@ from app.services.email import send_password_reset, send_welcome
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = get_logger("auth")
 
-REFRESH_COOKIE = "coachauto_refresh"
-# Scoped so the cookie is only ever sent to the refresh and logout routes.
+# Two apps, two cookies. The client portal and the coach dashboard are
+# separate frontends that both talk to this one API, and a session from one
+# must never be readable as a session in the other.
+REFRESH_COOKIE_NAMES: dict[str, str] = {
+    "client": "coachauto_refresh_client",
+    "staff": "coachauto_refresh_staff",
+}
+STAFF_ROLES = (UserRole.COACH, UserRole.ADMIN)
+
+# Scoped so each cookie is only ever sent to the refresh and logout routes.
 COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
 
+
+def refresh_audience(role: UserRole) -> str:
+    """Which cookie slot a user's session belongs in. Always derived from the
+    role on their own database row — never from anything the client sends —
+    so there is no way to ask for the wrong audience's cookie."""
+    return "staff" if role in STAFF_ROLES else "client"
+
 # How long a just-rotated refresh token keeps working.
-#
-# Rotation is the right default: each refresh burns the old token, so a stolen
-# one has a short life. But it makes concurrent refreshes fatal — whichever
-# request loses the race presents an already-revoked token, and a strict reader
-# treats that as theft and signs the person out.
-#
-# That race is not hypothetical. React StrictMode double-invokes effects in
-# development, so every page load fired two refreshes and the second one killed
-# the session. Duplicated tabs, restored browser sessions and retried requests
-# do the same thing in production.
-#
-# So: a token revoked within this window, whose replacement is still live, is a
-# benign double-fire and is answered from the replacement. Presented later than
-# this, or with no live replacement, it is treated as reuse and the whole
-# session family is revoked.
 ROTATION_GRACE = timedelta(seconds=30)
 
 
-def _set_refresh_cookie(response: Response, token: str) -> None:
+def _set_refresh_cookie(response: Response, token: str, audience: str) -> None:
     response.set_cookie(
-        key=REFRESH_COOKIE,
+        key=REFRESH_COOKIE_NAMES[audience],
         value=token,
         httponly=True,
         secure=settings.COOKIE_SECURE,
@@ -77,10 +77,17 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
-def _clear_refresh_cookie(response: Response) -> None:
+def _clear_refresh_cookie(response: Response, audience: str) -> None:
     response.delete_cookie(
-        key=REFRESH_COOKIE, path=COOKIE_PATH, domain=settings.COOKIE_DOMAIN
+        key=REFRESH_COOKIE_NAMES[audience], path=COOKIE_PATH, domain=settings.COOKIE_DOMAIN
     )
+
+
+def _clear_all_refresh_cookies(response: Response) -> None:
+    """Used where we do not yet know which audience's cookie is stale (e.g. an
+    unreadable or expired token on `/refresh`) — clear both rather than guess."""
+    for audience in REFRESH_COOKIE_NAMES:
+        _clear_refresh_cookie(response, audience)
 
 
 async def _issue_session(
@@ -91,7 +98,8 @@ async def _issue_session(
     *,
     rotated_from: RefreshSession | None = None,
 ) -> TokenResponse:
-    refresh_token, expires_at = create_refresh_token(user.id)
+    audience = refresh_audience(user.role)
+    refresh_token, expires_at = create_refresh_token(user.id, audience)
     session = RefreshSession(
         user_id=user.id,
         token_hash=hash_token(refresh_token),
@@ -109,7 +117,7 @@ async def _issue_session(
     user.last_login_at = datetime.now(UTC)
     await db.flush()
 
-    _set_refresh_cookie(response, refresh_token)
+    _set_refresh_cookie(response, refresh_token, audience)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role.value),
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
@@ -197,14 +205,30 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh(request: Request, response: Response, db: DbSession) -> TokenResponse:
-    token = request.cookies.get(REFRESH_COOKIE)
+async def refresh(
+    request: Request,
+    response: Response,
+    db: DbSession,
+    audience: str = Query(
+        "client",
+        pattern="^(client|staff)$",
+        description="Which app is asking: the client portal or the coach/admin dashboard. "
+        "Selects which of the two isolated session cookies to read — see "
+        "REFRESH_COOKIE_NAMES. Carries no privilege on its own: the session is still "
+        "resolved from the signed, server-stored token underneath it.",
+    ),
+) -> TokenResponse:
+    token = request.cookies.get(REFRESH_COOKIE_NAMES[audience])
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="No active session.")
 
-    payload = decode_token(token, "refresh")
+    # The audience is checked twice: once by which cookie we even looked at,
+    # and again against the claim baked into the token itself. Belt and
+    # braces — see the long comment above REFRESH_COOKIE_NAMES for why the
+    # second check exists independently of the first.
+    payload = decode_token(token, "refresh", expected_audience=audience)
     if payload is None:
-        _clear_refresh_cookie(response)
+        _clear_refresh_cookie(response, audience)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
 
     session = (
@@ -215,12 +239,20 @@ async def refresh(request: Request, response: Response, db: DbSession) -> TokenR
 
     now = datetime.now(UTC)
     if session is None or session.expires_at <= now:
-        _clear_refresh_cookie(response)
+        _clear_refresh_cookie(response, audience)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
 
     user = await db.get(User, session.user_id)
     if user is None or not user.is_active:
-        _clear_refresh_cookie(response)
+        _clear_refresh_cookie(response, audience)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
+
+    # Defence in depth: even a token that decoded fine and matched a live,
+    # unexpired session row must still belong to a user whose current role
+    # actually maps to the audience it claims. A coach demoted to client
+    # after this token was issued must not keep dashboard access on it.
+    if refresh_audience(user.role) != audience:
+        _clear_refresh_cookie(response, audience)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Your session has expired.")
 
     if session.revoked_at is not None:
@@ -249,7 +281,7 @@ async def refresh(request: Request, response: Response, db: DbSession) -> TokenR
 
         log.warning("auth.refresh_reuse", user_id=str(user.id), session_id=str(session.id))
         await _revoke_family(db, session)
-        _clear_refresh_cookie(response)
+        _clear_refresh_cookie(response, audience)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             detail="Your session was ended for security. Please sign in again.",
@@ -262,16 +294,26 @@ async def refresh(request: Request, response: Response, db: DbSession) -> TokenR
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(request: Request, response: Response, db: DbSession) -> None:
-    token = request.cookies.get(REFRESH_COOKIE)
-    if token:
-        session = (
-            await db.execute(
-                select(RefreshSession).where(RefreshSession.token_hash == hash_token(token))
-            )
-        ).scalar_one_or_none()
-        if session and session.revoked_at is None:
-            session.revoked_at = datetime.now(UTC)
-    _clear_refresh_cookie(response)
+    """Signs out whichever of the two session cookies this browser is holding.
+
+    Both are checked, not just the one the calling app would normally use.
+    Nothing stops someone having the client portal and the coach dashboard
+    open in the same browser at once, each with its own cookie — a stray
+    session in the other app is exactly the kind of loose end this endpoint
+    exists to close, so both are revoked and cleared here regardless of which
+    app's "Sign out" button was clicked.
+    """
+    for audience, cookie_name in REFRESH_COOKIE_NAMES.items():
+        token = request.cookies.get(cookie_name)
+        if token:
+            session = (
+                await db.execute(
+                    select(RefreshSession).where(RefreshSession.token_hash == hash_token(token))
+                )
+            ).scalar_one_or_none()
+            if session and session.revoked_at is None:
+                session.revoked_at = datetime.now(UTC)
+        _clear_refresh_cookie(response, audience)
 
 
 @router.post("/forgot-password", status_code=status.HTTP_202_ACCEPTED)
