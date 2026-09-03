@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, OptionalUser
 from app.core.logging import get_logger
+from app.core.media import api_path, media_url
 from app.core.security import sign_media_url, verify_media_token
 from app.models.engagement import Message, MessageAttachment, MessageThread
 from app.models.enums import AttachmentKind, UserRole
@@ -93,7 +94,9 @@ def attachment_url(attachment: MessageAttachment, viewer_id: uuid.UUID) -> str:
     photo would open every photo the same viewer could reach.
     """
     token = sign_media_url(attachment.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
-    return f"{settings.API_V1_PREFIX}/messages/attachments/{attachment.id}/file?token={token}"
+    return media_url(
+        api_path("messages", "attachments", str(attachment.id), "file", query=f"token={token}")
+    )
 
 
 def serialise_attachment(

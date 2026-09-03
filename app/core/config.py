@@ -53,6 +53,22 @@ class Settings(BaseSettings):
 
     # --- Public site --------------------------------------------------------
     FRONTEND_URL: str = "http://localhost:5173"
+
+    # The origin a *browser* uses to reach this API. Leave blank when the SPAs
+    # are served from the same origin as the API (local Vite proxy, or an
+    # nginx that proxies /api/ to the backend). Set it — e.g.
+    # "https://ca-backend.maktechgroups.com" — whenever the SPAs call the API
+    # on a different hostname.
+    #
+    # This is what makes private media work. Every signed media URL the API
+    # mints (message attachments, check-in photos, tutorial streams) is
+    # embedded in an <img>/<video> `src`, and a browser resolves a root-relative
+    # `src` against the *page* origin, not against whatever origin the SPA's
+    # XHR client is configured with. Emit a relative path while the SPA lives
+    # on a different host and every image and video request lands on the
+    # frontend's own web server instead of the API. Building these URLs from
+    # this setting removes the ambiguity: the API states its own address.
+    PUBLIC_API_URL: str = ""
     SUPPORT_EMAIL: str = "coachauto2026@gmail.com"
     INSTAGRAM_URL: str = "https://www.instagram.com/coach.auto"
 
@@ -167,6 +183,34 @@ class Settings(BaseSettings):
     # been the problem. Set to false to opt out, e.g. on a database you want
     # to keep completely clean.
     SEED_DEMO_CLIENTS: bool = True
+
+    @property
+    def public_api_origin(self) -> str:
+        """PUBLIC_API_URL with any trailing slash removed, or "" when unset.
+
+        Callers concatenate a path onto this, so a stray slash in the env file
+        would otherwise produce `https://api.example.com//api/v1/...`.
+        """
+        return self.PUBLIC_API_URL.rstrip("/")
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        """Hostnames this API will answer to in production.
+
+        Derived from the origins already configured rather than hard-coded, so
+        a new deployment domain is one environment variable and not a code
+        change. `TrustedHostMiddleware` matches on hostname only, so the
+        scheme and any port are stripped here.
+        """
+        origins = [*self.CORS_ORIGINS, self.PUBLIC_API_URL, self.FRONTEND_URL]
+        hosts: list[str] = ["localhost", "127.0.0.1"]
+        for origin in origins:
+            if not origin:
+                continue
+            host = origin.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+            if host and host not in hosts:
+                hosts.append(host)
+        return hosts
 
     @property
     def is_production(self) -> bool:

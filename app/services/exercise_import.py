@@ -61,7 +61,8 @@ class SyncReport:
 
 
 async def sync_catalog(db: AsyncSession, *, overwrite_videos: bool = False) -> SyncReport:
-    """Insert missing movements and fill in blank columns on existing ones.
+    """
+    Insert missing movements and fill in blank columns on existing ones.
 
     `overwrite_videos=False` is the default and the safe one: an exercise that
     already has a `video_url` keeps it, whatever the catalogue says. Pass True
@@ -73,6 +74,7 @@ async def sync_catalog(db: AsyncSession, *, overwrite_videos: bool = False) -> S
     catalogue is worse than none: `flush()` without a later `commit()` looks
     like a success in the logs and then rolls back on session close.
     """
+    
     report = SyncReport()
 
     existing = {

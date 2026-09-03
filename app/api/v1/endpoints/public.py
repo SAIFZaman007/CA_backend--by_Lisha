@@ -1,4 +1,5 @@
-"""Everything the marketing site needs, without a login.
+"""
+Everything the marketing site needs, without a login.
 
 Also home to the two files search engines fetch before anything else, the
 sitemap and robots.txt. Both are generated here rather than shipped as static
@@ -18,6 +19,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.deps import DbSession, OptionalUser
 from app.core.logging import get_logger
+from app.core.media import api_path, media_url
 from app.core.rate_limit import limiter
 from app.models.catalog import Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead
@@ -53,7 +55,7 @@ def _public_image_url(program: Program) -> str | None:
     shows artwork the other 404s on.
     """
     if program.image_key:
-        return f"/api/v1/programs/{program.id}/image"
+        return media_url(api_path("programs", str(program.id), "image"))
     return program.image_external_url
 
 
@@ -259,7 +261,8 @@ async def sitemap(db: DbSession) -> Response:
     if images:
         image_nodes = "\n".join(
             "    <image:image>\n"
-            f"      <image:loc>{escape(origin)}{settings.API_V1_PREFIX}/gallery/{image.id}/file</image:loc>\n"
+            f"      <image:loc>{escape(origin)}{settings.API_V1_PREFIX}"
+            f"/gallery/{image.id}/file</image:loc>\n"
             f"      <image:title>{escape(image.title)}</image:title>\n"
             f"      <image:caption>{escape(image.alt_text)}</image:caption>\n"
             "    </image:image>"

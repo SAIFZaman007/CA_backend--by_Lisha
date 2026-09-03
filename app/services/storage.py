@@ -92,12 +92,28 @@ async def save_progress_photo(
     return key, "image/jpeg", destination.stat().st_size
 
 
-def resolve_path(key: str) -> Path:
-    """Resolve a stored key to a path, refusing anything that escapes the root."""
+def resolve_path(key: str, *, not_found_message: str = "That file could not be found.") -> Path:
+    """Resolve a stored key to a path, refusing anything that escapes the root.
+
+    `not_found_message` lets each caller phrase the 404 in the language of the
+    thing it was actually serving — "That video could not be found." reads very
+    differently to a coach than "Photo not found." does. Every caller in the
+    codebase already passed this argument; the parameter being absent was a
+    `TypeError` at request time on every route that served a file, which is
+    what took tutorial streaming, check-in photos, gallery images and
+    programme artwork down together.
+
+    An empty or missing key is treated as not-found rather than resolving to
+    the upload root itself, which `is_file()` would reject anyway but only
+    after touching the filesystem.
+    """
+    if not key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=not_found_message)
+
     root = _root().resolve()
     candidate = (root / key).resolve()
     if not candidate.is_relative_to(root) or not candidate.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found.")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=not_found_message)
     return candidate
 
 
@@ -211,9 +227,6 @@ async def save_tutorial_video(upload: UploadFile) -> tuple[str, str, int]:
             while chunk := await upload.read(VIDEO_CHUNK):
                 written += len(chunk)
                 if written > limit:
-                    # Stop the moment the limit is passed and take the partial
-                    # file with us — a rejected upload must not leave megabytes
-                    # of orphaned data on the volume.
                     handle.close()
                     destination.unlink(missing_ok=True)
                     raise HTTPException(
@@ -238,9 +251,6 @@ async def save_tutorial_video(upload: UploadFile) -> tuple[str, str, int]:
 
 
 # --- Programme artwork --------------------------------------------------------
-#
-# Unlike check-in photos these are public marketing images, so they are
-# downscaled harder and served without authentication.
 
 PROGRAM_IMAGE_MAX = 1400
 
@@ -252,8 +262,6 @@ async def save_program_image(program_id: uuid.UUID, upload: UploadFile) -> tuple
 
     directory = _root() / "programs"
     directory.mkdir(parents=True, exist_ok=True)
-    # Keyed by program plus a random suffix: replacing artwork writes a new file
-    # so a cached URL never serves the previous tier's photo.
     filename = f"{program_id}-{secrets.token_urlsafe(8)}.jpg"
     destination = directory / filename
 

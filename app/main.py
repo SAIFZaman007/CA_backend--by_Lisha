@@ -70,23 +70,13 @@ app.add_middleware(
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
-    expose_headers=["X-Request-ID"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Range", "If-Range"],
+    expose_headers=["X-Request-ID", "Content-Range", "Accept-Ranges", "Content-Length"],
     max_age=600,
 )
 
 if settings.is_production:
-    hosts = [o.replace("https://", "").replace("http://", "") for o in settings.CORS_ORIGINS]
-    
-    app.add_middleware(
-        TrustedHostMiddleware, 
-        allowed_hosts=[
-            *hosts, 
-            "localhost", 
-            "127.0.0.1", 
-            "ca-backend.maktechgroups.com"
-        ]
-    )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -122,11 +112,17 @@ async def request_context(request: Request, call_next):
             "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
             "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
             "img-src 'self' https://fastapi.tiangolo.com data:; "
-            "connect-src 'self' https://cdn.jsdelivr.net http://127.0.0.1:8000 http://localhost:8000; "
+            "connect-src 'self' https://cdn.jsdelivr.net "
+            "http://127.0.0.1:8000 http://localhost:8000; "
             "frame-ancestors 'none';"
         )
     else:
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+
+    # Private media must never end up in a search index or a shared cache.
+    if request.url.path.endswith(("/file", "/stream")):
+        response.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
+        
     # --- CSP Modification End ---
 
     if settings.is_production:

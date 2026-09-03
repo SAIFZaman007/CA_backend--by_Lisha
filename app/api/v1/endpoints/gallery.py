@@ -1,4 +1,5 @@
-"""The public gallery — "Hall of the Coach".
+"""
+The public gallery — "Hall of the Coach".
 
 Unauthenticated on purpose. Everything here is marketing imagery the client
 wants found: transformations, coaching shots, competition photos,
@@ -14,8 +15,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
-from app.core.config import settings
 from app.core.deps import DbSession
+from app.core.media import api_path, media_url
 from app.models.enums import GALLERY_CATEGORY_LABELS, GalleryCategory
 from app.models.gallery import GalleryImage
 from app.schemas.gallery import (
@@ -30,14 +31,17 @@ router = APIRouter(prefix="/gallery", tags=["gallery"])
 
 
 def image_url(image: GalleryImage) -> str:
-    """The public, cacheable address of one gallery image.
-
-    A path rather than an absolute URL, so the same response works behind the
-    nginx proxy in production and Vite's dev proxy locally. The frontend and
-    the sitemap builder are the two places that need it absolute, and both
-    already know the canonical origin.
     """
-    return f"{settings.API_V1_PREFIX}/gallery/{image.id}/file"
+    The public, cacheable address of one gallery image.
+
+    Absolute when the API is served from its own hostname, relative when it
+    shares one with the site — `media_url` makes that decision from
+    `PUBLIC_API_URL` so the answer is the same everywhere media is addressed.
+    A relative path here is only correct while the public site and the API
+    answer on the same origin, and assuming that quietly is what broke every
+    private image in production.
+    """
+    return media_url(api_path("gallery", str(image.id), "file"))
 
 
 def serialise(image: GalleryImage) -> GalleryImageOut:
@@ -92,7 +96,8 @@ async def list_sections(
     db: DbSession,
     per_category: int = Query(60, ge=1, le=200),
 ) -> list[GallerySection]:
-    """Every published image, already grouped by category.
+    """
+    Every published image, already grouped by category.
 
     One request rather than one per heading. The gallery page renders a
     section per category and a client with eight categories would otherwise
@@ -156,7 +161,8 @@ async def list_categories(
 async def gallery_file(
     image_id: uuid.UUID, db: DbSession
 ) -> FileResponse:
-    """The bytes. Public, immutable, cached hard.
+    """
+    The bytes. Public, immutable, cached hard.
 
     Safe to cache for a year because replacing an image writes a new random
     filename and a new row id — see `storage.save_gallery_image`. A URL that

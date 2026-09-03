@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, OptionalUser
+from app.core.media import api_path, media_url
 from app.core.security import sign_media_url, verify_media_token
 from app.models.enums import PhotoPose
 from app.models.tracking import BodyMeasurement, ProgressPhoto, WeightLog
@@ -132,7 +133,9 @@ def _photo_url(photo: ProgressPhoto, viewer_id: uuid.UUID) -> str:
     same route serves both a scripted fetch and a plain image tag.
     """
     token = sign_media_url(photo.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
-    return f"/api/v1/progress/photos/{photo.id}/file?token={token}"
+    return media_url(
+        api_path("progress", "photos", str(photo.id), "file", query=f"token={token}")
+    )
 
 
 @router.get("/photos", response_model=list[ProgressPhotoOut])
