@@ -80,6 +80,20 @@ class Settings(BaseSettings):
     # it is pasted anywhere.
     MEDIA_URL_TTL_SECONDS: int = 900
 
+    # A <video> tag has the same "cannot send a header" problem as <img>, but a
+    # very different usage pattern: a photo loads once and is done, while a
+    # video keeps issuing new range requests for as long as someone is
+    # watching, scrubbing, or has it paused on a tab they haven't closed. A
+    # signed URL embedded once in `src` does not get re-minted just because
+    # playback is still going, so it has to outlive a realistic viewing
+    # session on its own — a coaching demo clip, paused and resumed a few
+    # times, comfortably fits in an hour. `stream_tutorial` also accepts a
+    # normal Bearer access token as a first-class alternative (see
+    # `OptionalUser` there), so a client that *can* send one — the dashboard's
+    # own preview player, for instance — is never limited by this at all; this
+    # TTL only bounds the signed-URL fallback that a bare <video> tag needs.
+    MEDIA_VIDEO_URL_TTL_SECONDS: int = 3600
+
     MAX_VIDEO_UPLOAD_MB: int = 512
     ALLOWED_VIDEO_TYPES: Annotated[list[str], NoDecode] = [
         "video/mp4",

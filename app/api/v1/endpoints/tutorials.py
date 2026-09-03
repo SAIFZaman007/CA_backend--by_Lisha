@@ -143,12 +143,14 @@ def attach_stream_url(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> VideoTut
     """Give an uploaded tutorial a playable address.
 
     A hosted tutorial already has one. An uploaded one is a private file, so it
-    gets a short-lived signed URL that a <video> tag can load directly — the
-    same trick the check-in photos use, and for the same reason: media elements
-    cannot send an Authorization header.
+    gets a signed URL that a <video> tag can load directly — the same trick the
+    check-in photos use, and for the same reason: media elements cannot send an
+    Authorization header. Deliberately a longer-lived signature than a photo's
+    (`MEDIA_VIDEO_URL_TTL_SECONDS`, not `MEDIA_URL_TTL_SECONDS`) — see the
+    comment on that setting for why a video needs more runway than an image.
     """
     if tutorial.file_key and not tutorial.video_url:
-        token = sign_media_url(tutorial.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
+        token = sign_media_url(tutorial.id, viewer_id, settings.MEDIA_VIDEO_URL_TTL_SECONDS)
         tutorial.video_url = f"/api/v1/tutorials/{tutorial.id}/stream?token={token}"
     return tutorial
 
