@@ -16,6 +16,7 @@ from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentAdmin, CurrentCoach, DbSession
 from app.core.logging import get_logger
+from app.core.media import api_path, media_url
 from app.core.security import hash_password
 from app.models.engagement import Message, MessageThread
 from app.models.enums import SessionStatus, TrainingLevel, UserRole
@@ -455,7 +456,9 @@ async def client_detail(
                 id=p.id,
                 log_date=p.log_date,
                 pose=p.pose.value,
-                url=f"/api/v1/admin/clients/{client_id}/photos/{p.id}/file",
+                url=media_url(
+                    api_path("admin", "clients", str(client_id), "photos", str(p.id), "file")
+                ),
                 note=p.note,
             )
             for p in photos

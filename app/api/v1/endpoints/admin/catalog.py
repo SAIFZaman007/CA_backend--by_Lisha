@@ -17,8 +17,10 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from slugify import slugify
 from sqlalchemy import func, or_, select
 
+from app.api.v1.endpoints.tutorials import stream_url
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
+from app.core.media import api_path, media_url
 from app.models.catalog import Program
 from app.models.enums import Equipment, TrainingLevel, TutorialCategory, VideoProvider
 from app.models.media import VideoTutorial
@@ -37,12 +39,28 @@ router = APIRouter()
 log = get_logger("admin.catalog")
 
 
+def _serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> TutorialAdminOut:
+    """The dashboard's view of one tutorial, with a preview URL it can play.
+
+    Uploaded videos have no `video_url` in the database — by design, since a
+    playable address for a private file is a signed, expiring, per-viewer
+    thing and a database column is none of those. Computing it here is what
+    lets the coach preview an upload without the stored row ever holding a
+    token. See `tutorials.serialise_tutorial` for what went wrong when this
+    value was written onto the ORM object instead.
+    """
+    data = TutorialAdminOut.model_validate(tutorial)
+    if tutorial.file_key and not tutorial.video_url:
+        data.video_url = stream_url(tutorial, viewer_id)
+    return data
+
+
 def _image_url(program: Program) -> str | None:
     """Whichever artwork the coach supplied: an upload wins over a pasted link."""
     if program.image_key:
         # See the comment on `upload_program_image`'s return value — the real
         # route has no `/public` segment.
-        return f"/api/v1/programs/{program.id}/image"
+        return media_url(api_path("programs", str(program.id), "image"))
     return program.image_external_url
 
 
@@ -198,7 +216,7 @@ async def list_tutorials(
     published: bool | None = None,
     limit: int = Query(100, ge=1, le=300),
     offset: int = Query(0, ge=0),
-) -> list[VideoTutorial]:
+) -> list[TutorialAdminOut]:
     stmt = select(VideoTutorial)
 
     if search:
@@ -228,13 +246,14 @@ async def list_tutorials(
         .limit(limit)
         .offset(offset)
     )
-    return list((await db.execute(stmt)).scalars().all())
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_serialise_tutorial(row, coach.id) for row in rows]
 
 
 @router.post("/tutorials", response_model=TutorialAdminOut, status_code=status.HTTP_201_CREATED)
 async def create_tutorial(
     payload: TutorialCreate, coach: CurrentCoach, db: DbSession
-) -> VideoTutorial:
+) -> TutorialAdminOut:
     data = payload.model_dump()
     video_url = str(payload.video_url) if payload.video_url is not None else None
 
@@ -252,13 +271,13 @@ async def create_tutorial(
     await db.flush()
     await db.refresh(tutorial)
     log.info("admin.tutorial_created", tutorial_id=str(tutorial.id), by=str(coach.id))
-    return tutorial
+    return _serialise_tutorial(tutorial, coach.id)
 
 
 @router.patch("/tutorials/{tutorial_id}", response_model=TutorialAdminOut)
 async def update_tutorial(
     tutorial_id: uuid.UUID, payload: TutorialUpdate, coach: CurrentCoach, db: DbSession
-) -> VideoTutorial:
+) -> TutorialAdminOut:
     tutorial = await db.get(VideoTutorial, tutorial_id)
     if tutorial is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
@@ -286,7 +305,7 @@ async def update_tutorial(
         setattr(tutorial, field, value)
     await db.flush()
     await db.refresh(tutorial)
-    return tutorial
+    return _serialise_tutorial(tutorial, coach.id)
 
 
 @router.delete("/tutorials/{tutorial_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -339,7 +358,7 @@ async def upload_program_image(
 
     log.info("admin.program_image_uploaded", program_id=str(program_id), bytes=size)
 
-    return {"image_url": f"/api/v1/programs/{program_id}/image"}
+    return {"image_url": media_url(api_path("programs", str(program_id), "image"))}
 
 
 @router.post("/tutorials/upload", status_code=status.HTTP_201_CREATED)
