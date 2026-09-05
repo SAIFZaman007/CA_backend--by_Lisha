@@ -3,7 +3,18 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,7 +23,19 @@ from app.models.enums import AttachmentKind, BookingStatus, LeadStatus, Training
 
 
 class MessageThread(UUIDMixin, TimestampMixin, Base):
+    """One client's single conversation with the coach.
+
+    "Single" is now enforced rather than assumed. Nothing used to stop a second
+    row appearing for the same client — a race between the portal opening a
+    thread and the inbox opening one was enough — and the result was a client
+    and a coach unknowingly writing into two halves of the same conversation.
+    Migration 0008 merged the duplicates and added this constraint; it is
+    declared here as well so autogenerate does not read it as drift and propose
+    dropping it.
+    """
+
     __tablename__ = "message_threads"
+    __table_args__ = (UniqueConstraint("client_id", name="uq_message_threads_client_id"),)
 
     client_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
