@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -33,19 +33,19 @@ from app.services import storage
 router = APIRouter(prefix="/messages", tags=["messages"])
 log = get_logger("messages")
 
+STAFF_ROLES = (UserRole.COACH, UserRole.ADMIN)
+
 
 # --- Participants -------------------------------------------------------------
 
 
 async def _coach(db: DbSession) -> User:
-    # The business runs on a single coach who is also the super admin, so that
-    # account's role is ADMIN. Matching only COACH found nobody and every client
-    # thread failed — this looks for either, oldest first.
+
     coach = (
         await db.execute(
             select(User)
-            .where(User.role.in_((UserRole.COACH, UserRole.ADMIN)), User.is_active.is_(True))
-            .order_by(User.role == UserRole.COACH, User.created_at)
+            .where(User.role.in_(STAFF_ROLES), User.is_active.is_(True))
+            .order_by((User.role == UserRole.COACH).desc(), User.created_at)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -57,28 +57,54 @@ async def _coach(db: DbSession) -> User:
     return coach
 
 
-async def _thread_for(db: DbSession, user: User) -> MessageThread:
-    coach = await _coach(db)
-    if user.role in (UserRole.COACH, UserRole.ADMIN):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Coaches open client threads from the coach dashboard.",
-        )
+async def thread_for_client(
+    db: DbSession, client_id: uuid.UUID, coach_id: uuid.UUID
+) -> MessageThread:
+    """
+    The one thread belonging to a client, created if it does not exist yet.
 
-    stmt = (
-        select(MessageThread)
-        .where(MessageThread.client_id == user.id)
-        .options(selectinload(MessageThread.messages).selectinload(Message.attachments))
+    Shared by both sides on purpose. When the client portal and the coach
+    dashboard each had their own lookup, they disagreed: one took
+    `.scalars().first()` with no ordering, the other `.scalar_one_or_none()`,
+    which raises outright the moment a client has two thread rows. Two rows is
+    not exotic — nothing in the schema forbade it, and a race between a client
+    opening the portal and the coach opening the inbox produced it. The result
+    was a client and a coach reading two different halves of the same
+    conversation. Migration 0008 collapses the duplicates and adds the unique
+    index that should always have been there; this ordering keeps the answer
+    deterministic in the meantime.
+    """
+    thread = (
+        (
+            await db.execute(
+                select(MessageThread)
+                .where(MessageThread.client_id == client_id)
+                .order_by(MessageThread.created_at)
+                .limit(1)
+                .options(selectinload(MessageThread.messages).selectinload(Message.attachments))
+            )
+        )
+        .scalars()
+        .first()
     )
-    thread = (await db.execute(stmt)).scalars().first()
     if thread:
         return thread
 
-    thread = MessageThread(client_id=user.id, coach_id=coach.id)
+    thread = MessageThread(client_id=client_id, coach_id=coach_id)
     db.add(thread)
     await db.flush()
     await db.refresh(thread, ["messages"])
     return thread
+
+
+async def _thread_for(db: DbSession, user: User) -> MessageThread:
+    coach = await _coach(db)
+    if user.role in STAFF_ROLES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Coaches open client threads from the coach dashboard.",
+        )
+    return await thread_for_client(db, user.id, coach.id)
 
 
 # --- Attachment URLs ----------------------------------------------------------
@@ -92,6 +118,10 @@ def attachment_url(attachment: MessageAttachment, viewer_id: uuid.UUID) -> str:
     same route serves a scripted fetch and a plain image tag. The signature is
     bound to this one attachment: without that binding, a token minted for one
     photo would open every photo the same viewer could reach.
+
+    The origin is resolved by `media_url` from the request being answered, so
+    the portal is handed a portal-origin URL and the dashboard a
+    dashboard-origin one — each already inside its own page's CSP.
     """
     token = sign_media_url(attachment.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
     return media_url(
@@ -265,11 +295,11 @@ async def upload_attachment(
 async def discard_attachment(
     attachment_id: uuid.UUID, user: CurrentUser, db: DbSession
 ) -> None:
-    """Remove an attachment the client picked and then thought better of.
+    """Remove an attachment the sender picked and then thought better of.
 
     Only while it is still unbound. Once it is part of a sent message it is
-    part of the conversation history, and deleting half a message the coach has
-    already read is not a tidy-up, it is a rewrite.
+    part of the conversation history, and deleting half a message the other
+    side has already read is not a tidy-up, it is a rewrite.
     """
     attachment = await db.get(MessageAttachment, attachment_id)
     if attachment is None or attachment.uploaded_by_id != user.id:
@@ -284,6 +314,40 @@ async def discard_attachment(
     await db.delete(attachment)
 
 
+async def resolve_media_viewer(
+    db: DbSession,
+    *,
+    user: User | None,
+    token: str | None,
+    resource_id: uuid.UUID,
+) -> User | None:
+    """
+    Identify who is asking for a private file, as a `User` and not just an id.
+
+    Two ways in, because two different callers need it: a signed `token` for an
+    `<img>` tag, which cannot send an Authorization header, and a bearer token
+    for a scripted fetch.
+
+    Returning the whole row rather than a UUID is the point. Authorising
+    private media needs the viewer's *role*, and a bare id cannot answer that
+    without a second lookup every call site would have to remember to write.
+    """
+    if user is not None:
+        return user
+    if not token:
+        return None
+
+    viewer_id = verify_media_token(token, resource_id)
+    if viewer_id is None:
+        return None
+
+    viewer = await db.get(User, viewer_id)
+    # A signature stays cryptographically valid until it expires. Deactivating
+    # an account has to cut off its outstanding image links too, so the row is
+    # re-checked rather than trusted from the token alone.
+    return viewer if viewer is not None and viewer.is_active else None
+
+
 @router.get("/attachments/{attachment_id}/file")
 async def attachment_file(
     attachment_id: uuid.UUID,
@@ -293,28 +357,33 @@ async def attachment_file(
 ) -> Response:
     """Serve one attachment to someone entitled to see it.
 
-    Two ways to identify the viewer, because two different callers need it: a
-    signed `token` for an <img> tag, which cannot send an Authorization header,
-    and a bearer token for a scripted fetch. Either way, identifying the viewer
-    and authorising them are separate steps — the signature proves who asked,
-    not what they are allowed to see.
+    Identifying the viewer and authorising them are separate steps — the
+    signature proves who asked, not what they are allowed to see.
     """
     attachment = await db.get(MessageAttachment, attachment_id)
     if attachment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Image not found.")
 
-    viewer_id: uuid.UUID | None = verify_media_token(token, attachment_id) if token else None
-    if viewer_id is None and user is not None:
-        viewer_id = user.id
-    if viewer_id is None:
+    viewer = await resolve_media_viewer(
+        db, user=user, token=token, resource_id=attachment_id
+    )
+    if viewer is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="That link has expired.")
 
     if attachment.message_id is None:
-        # Still unsent. Visible to whoever uploaded it and nobody else — this is
-        # the preview in the client's own composer.
-        permitted = attachment.uploaded_by_id == viewer_id
+        # Still unsent: this is the preview in someone's own composer, and it
+        # belongs to nobody but them. Staff get no exemption here — an image a
+        # client has picked but not sent has not been shared yet.
+        permitted = attachment.uploaded_by_id == viewer.id
+    elif viewer.role in STAFF_ROLES:
+        # Sent, and the viewer is the coach side of the business. Every client
+        # thread is theirs to read — that is what the inbox is. Checked by role
+        # rather than against `message_threads.coach_id` for the reason set out
+        # at the top of this module.
+        permitted = True
     else:
-        # Sent. Visible to both sides of the conversation it landed in.
+        # Sent, and the viewer is a client: only if it landed in their own
+        # thread.
         permitted = bool(
             (
                 await db.execute(
@@ -322,10 +391,7 @@ async def attachment_file(
                     .join(MessageThread, MessageThread.id == Message.thread_id)
                     .where(
                         Message.id == attachment.message_id,
-                        or_(
-                            MessageThread.client_id == viewer_id,
-                            MessageThread.coach_id == viewer_id,
-                        ),
+                        MessageThread.client_id == viewer.id,
                     )
                 )
             ).scalar_one()
@@ -337,7 +403,7 @@ async def attachment_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Image not found.")
 
     return FileResponse(
-        storage.resolve_path(attachment.file_key),
+        storage.resolve_path(attachment.file_key, not_found_message="Image not found."),
         media_type=attachment.content_type,
         # Private, and short. Long enough that scrolling a conversation does not
         # refetch every photo, short enough that a shared browser does not hold

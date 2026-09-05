@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
-from app.api.v1.endpoints.messages import claim_attachments, serialise_attachment
+from app.api.v1.endpoints.messages import (
+    claim_attachments,
+    serialise_attachment,
+    thread_for_client,
+)
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
@@ -94,9 +98,6 @@ async def list_threads(
         last = thread.messages[-1] if thread.messages else None
         summaries.append(
             ThreadSummary(
-                # An image-only message has an empty body, so a preview line
-                # alone would render as blank and read as "nothing here". The
-                # flag is what puts a paperclip on the row instead.
                 has_attachments=bool(last and last.attachments),
                 thread_id=thread.id,
                 client_id=client.id,
@@ -111,19 +112,29 @@ async def list_threads(
     return summaries
 
 
-async def _thread_for_client(db: DbSession, client_id: uuid.UUID, coach_id: uuid.UUID):
-    thread = (
-        await db.execute(select(MessageThread).where(MessageThread.client_id == client_id))
-    ).scalar_one_or_none()
+async def _open_thread(db: DbSession, client_id: uuid.UUID, coach: User) -> MessageThread:
+    """
+    The client's thread, from the coach's side.
 
-    if thread is None:
-        client = await db.get(User, client_id)
-        if client is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That client was not found.")
-        thread = MessageThread(client_id=client_id, coach_id=coach_id)
-        db.add(thread)
-        await db.flush()
-        await db.refresh(thread, ["messages"])
+    Resolution is delegated to `messages.thread_for_client` so both front ends
+    land on the same row. When the portal and the inbox each had their own
+    lookup they could disagree, and a client and a coach ended up reading two
+    different halves of one conversation.
+
+    `coach_id` is re-pointed at whoever is actually coaching. The column exists
+    to say who is on the other end of this thread, and a stale value — left
+    behind by an account that opened the thread months ago — is simply wrong.
+    Nothing depends on it for access any more (see the note at the top of
+    `app.api.v1.endpoints.messages`), so this is bookkeeping, not a permission
+    check, and it heals rows written before that was true.
+    """
+    client = await db.get(User, client_id)
+    if client is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That client was not found.")
+
+    thread = await thread_for_client(db, client_id, coach.id)
+    if thread.coach_id != coach.id:
+        thread.coach_id = coach.id
     return thread
 
 
@@ -139,7 +150,7 @@ async def read_thread(
     if client is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That client was not found.")
 
-    thread = await _thread_for_client(db, client_id, coach.id)
+    thread = await _open_thread(db, client_id, coach)
     now = datetime.now(UTC)
 
     for message in thread.messages:
@@ -181,7 +192,7 @@ async def read_thread(
 async def reply(
     client_id: uuid.UUID, payload: MessageIn, coach: CurrentCoach, db: DbSession
 ) -> ThreadMessage:
-    thread = await _thread_for_client(db, client_id, coach.id)
+    thread = await _open_thread(db, client_id, coach)
 
     message = Message(thread_id=thread.id, sender_id=coach.id, body=payload.body.strip())
     db.add(message)
