@@ -38,8 +38,6 @@ down_revision: str | None = "0007_tutorial_poster_frames"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-
-# One survivor per client, and the mapping from every duplicate to it.
 _SURVIVORS = """
     SELECT
         id,
@@ -53,7 +51,7 @@ _SURVIVORS = """
 
 
 def upgrade() -> None:
-    # 1. Move every message out of a duplicate and into its survivor.
+
     op.execute(
         f"""
         UPDATE messages AS m
@@ -64,8 +62,6 @@ def upgrade() -> None:
         """
     )
 
-    # 2. Drop the now-empty duplicates. Computed inside the statement, so the
-    #    survivor set is the one that existed before any row was removed.
     op.execute(
         f"""
         DELETE FROM message_threads AS t
@@ -75,9 +71,6 @@ def upgrade() -> None:
         """
     )
 
-    # 3. A survivor that absorbed newer messages has a stale ordering key, and
-    #    `last_message_at` is what sorts the coach's inbox — a merged thread
-    #    with the wrong value sinks to the bottom of the list.
     op.execute(
         """
         UPDATE message_threads AS t
