@@ -23,7 +23,8 @@ from app.models.enums import AttachmentKind, BookingStatus, LeadStatus, Training
 
 
 class MessageThread(UUIDMixin, TimestampMixin, Base):
-    """One client's single conversation with the coach.
+    """
+    One client's single conversation with the coach.
 
     "Single" is now enforced rather than assumed. Nothing used to stop a second
     row appearing for the same client — a race between the portal opening a
@@ -67,9 +68,7 @@ class Message(UUIDMixin, TimestampMixin, Base):
     sender_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    # Stays NOT NULL, but an image-only message stores an empty string rather
-    # than forcing the sender to invent a caption. The schema layer enforces
-    # the real rule: a message must carry text, an attachment, or both.
+
     body: Mapped[str] = mapped_column(Text, default="", nullable=False)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -83,7 +82,8 @@ class Message(UUIDMixin, TimestampMixin, Base):
 
 
 class MessageAttachment(UUIDMixin, TimestampMixin, Base):
-    """An image a client sent their coach — a loaded bar, a meal, a scale.
+    """
+    An image a client sent their coach — a loaded bar, a meal, a scale.
 
     `message_id` is nullable, and that is the whole design. Bytes go up on
     their own request and land here unattached, owned by the uploader. The
@@ -98,14 +98,7 @@ class MessageAttachment(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "message_attachments"
     __table_args__ = (
-        # Declared on the model as well as in the migration, so autogenerate
-        # does not decide this index is drift and propose dropping it.
-        #
-        # Partial, matching the orphan sweep exactly: my unbound uploads older
-        # than a cutoff. Indexing only the rows where `message_id IS NULL`
-        # keeps it to the handful that are actually in play rather than the
-        # whole attachment history, which is almost entirely bound rows the
-        # sweep will never look at.
+
         Index(
             "ix_message_attachments_orphans",
             "uploaded_by_id",
@@ -119,9 +112,7 @@ class MessageAttachment(UUIDMixin, TimestampMixin, Base):
         ForeignKey("messages.id", ondelete="CASCADE"),
         index=True,
     )
-    # Kept even after binding: this is who is allowed to reference the row
-    # while it is still unbound, and it is the only check standing between one
-    # client and another client's upload.
+
     uploaded_by_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
@@ -136,8 +127,6 @@ class MessageAttachment(UUIDMixin, TimestampMixin, Base):
     file_size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    # The client's own filename, shown on hover and used for the download name.
-    # Never used to build a path — see `storage.save_message_image`.
     original_name: Mapped[str | None] = mapped_column(String(200))
 
     message: Mapped["Message | None"] = relationship(back_populates="attachments")
