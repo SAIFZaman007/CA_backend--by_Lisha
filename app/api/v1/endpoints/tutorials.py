@@ -1,4 +1,5 @@
-"""Video tutorials — the read-only library inside the client portal.
+"""
+Video tutorials — the read-only library inside the client portal.
 
 Clients see published recordings only. Everything here is filtered by
 `is_published`, so an unfinished draft in the dashboard never leaks.
@@ -132,7 +133,8 @@ async def get_tutorial(
 
 @router.post("/{tutorial_id}/view", status_code=status.HTTP_204_NO_CONTENT)
 async def record_view(tutorial_id: uuid.UUID, user: CurrentUser, db: DbSession) -> None:
-    """Counts a play so the coach can see which clips clients actually use.
+    """
+    Counts a play so the coach can see which clips clients actually use.
 
     Incremented in SQL rather than read-modify-write, so two clients pressing
     play at the same moment cannot lose a count.
@@ -148,7 +150,8 @@ async def record_view(tutorial_id: uuid.UUID, user: CurrentUser, db: DbSession) 
     )
 
 def stream_url(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> str:
-    """A signed, playable address for an uploaded tutorial file.
+    """
+    A signed, playable address for an uploaded tutorial file.
 
     An uploaded video is a private file, so it gets a signed URL a <video> tag
     can load directly — the same trick the check-in photos use, and for the
@@ -163,8 +166,38 @@ def stream_url(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> str:
     )
 
 
+def poster_url(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> str:
+    """
+    A signed address for a poster frame held on our own volume.
+
+    Signed for the same reason the video itself is: the tutorial library sits
+    behind a login, so its imagery should not be readable by anyone who happens
+    to guess a path. Given the same TTL as the video rather than the shorter
+    image one, because a poster and the clip it belongs to are looked at in the
+    same sitting and it would be odd for the still to expire first.
+    """
+    token = sign_media_url(tutorial.id, viewer_id, settings.MEDIA_VIDEO_URL_TTL_SECONDS)
+    return media_url(
+        api_path("tutorials", str(tutorial.id), "poster", query=f"token={token}")
+    )
+
+
+def resolve_thumbnail(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> str | None:
+    """
+    Whichever still this tutorial actually has.
+
+    A locally captured poster wins over a provider's, because it is the frame
+    the coach chose for this clip. Falling through to `thumbnail_url` keeps
+    every existing YouTube and Vimeo tutorial rendering exactly as before.
+    """
+    if tutorial.thumbnail_key:
+        return poster_url(tutorial, viewer_id)
+    return tutorial.thumbnail_url
+
+
 def serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> TutorialOut:
-    """Build the response, computing the playback URL rather than storing it.
+    """
+    Build the response, computing the playback URL rather than storing it.
 
     This used to assign the signed URL onto `tutorial.video_url` and return the
     ORM object. That looked harmless and was not: `tutorial` is a *persistent*
@@ -184,6 +217,7 @@ def serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> Tutoria
     data = TutorialOut.model_validate(tutorial)
     if tutorial.file_key and not tutorial.video_url:
         data.video_url = stream_url(tutorial, viewer_id)
+    data.thumbnail_url = resolve_thumbnail(tutorial, viewer_id)
     return data
 
 
@@ -194,7 +228,8 @@ async def stream_tutorial(
     user: OptionalUser = None,
     token: str | None = Query(None),
 ) -> FileResponse:
-    """Serve an uploaded tutorial file.
+    """
+    Serve an uploaded tutorial file.
 
     Accepts a bearer token or a signed `token` parameter, so both a scripted
     fetch and a plain <video src> work.
@@ -217,4 +252,39 @@ async def stream_tutorial(
         path,
         media_type=VIDEO_MEDIA_TYPES.get(path.suffix.lower(), "video/mp4"),
         headers={"Cache-Control": "private, max-age=900"},
+    )
+
+
+@router.get("/{tutorial_id}/poster")
+async def tutorial_poster(
+    tutorial_id: uuid.UUID,
+    db: DbSession,
+    user: OptionalUser = None,
+    token: str | None = Query(None),
+) -> FileResponse:
+    """
+    Serve the poster frame for an uploaded tutorial.
+
+    Same two ways in as the stream: a bearer token for a scripted fetch, a
+    signed `token` for a plain <img src>, which cannot send a header. Cached
+    longer than the video because a poster is small, immutable for the life of
+    the row, and requested once per card on every visit to the library —
+    exactly the shape of thing that should not come back over the wire twice.
+    """
+    viewer_id = user.id if user else (verify_media_token(token, tutorial_id) if token else None)
+    if viewer_id is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="This image link has expired. Reload the page."
+        )
+
+    tutorial = await db.get(VideoTutorial, tutorial_id)
+    if tutorial is None or not tutorial.is_published or not tutorial.thumbnail_key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
+
+    return FileResponse(
+        storage.resolve_path(
+            tutorial.thumbnail_key, not_found_message="That image was not found."
+        ),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
     )

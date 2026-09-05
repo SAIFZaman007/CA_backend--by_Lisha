@@ -1,4 +1,5 @@
-"""Coaching media: the video tutorial library clients watch before they train.
+"""
+Coaching media: the video tutorial library clients watch before they train.
 
 Recordings are posted, edited and retired from the admin dashboard. Clients get
 a read-only, published-only view of the same rows.
@@ -14,11 +15,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, UUIDMixin
 from app.models.enums import Equipment, TrainingLevel, TutorialCategory, VideoProvider
 
-
 class VideoTutorial(UUIDMixin, TimestampMixin, Base):
-    """One recording. The file itself is never uploaded here — the coach pastes a
+    """
+    One recording. The file itself is never uploaded here — the coach pastes a
     YouTube, Vimeo or direct MP4 link, so storage and bandwidth stay off our bill
-    and the platform keeps its own analytics."""
+    and the platform keeps its own analytics.
+    """
 
     __tablename__ = "video_tutorials"
 
@@ -36,13 +38,13 @@ class VideoTutorial(UUIDMixin, TimestampMixin, Base):
     provider: Mapped[VideoProvider] = mapped_column(
         Enum(VideoProvider, name="video_provider"), default=VideoProvider.YOUTUBE, nullable=False
     )
-    # Either a hosting link OR an uploaded file — never neither. `video_url` is
-    # nullable because an uploaded tutorial has no external address; the schema
-    # enforces that exactly one of the two is supplied.
+    
     video_url: Mapped[str | None] = mapped_column(String(500))
     file_key: Mapped[str | None] = mapped_column(String(300))
     file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+ 
     thumbnail_url: Mapped[str | None] = mapped_column(String(500))
+    thumbnail_key: Mapped[str | None] = mapped_column(String(300))
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
 
     # Discovery
@@ -53,8 +55,6 @@ class VideoTutorial(UUIDMixin, TimestampMixin, Base):
     )
     tags: Mapped[list[str]] = mapped_column(ARRAY(String(40)), default=list, nullable=False)
 
-    # Optional link to the movement it demonstrates, so the workout page can
-    # deep-link straight to the right clip.
     exercise_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("exercises.id", ondelete="SET NULL"), index=True
     )

@@ -17,7 +17,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from slugify import slugify
 from sqlalchemy import func, or_, select
 
-from app.api.v1.endpoints.tutorials import stream_url
+from app.api.v1.endpoints.tutorials import resolve_thumbnail, stream_url
 from app.core.deps import CurrentCoach, DbSession
 from app.core.logging import get_logger
 from app.core.media import api_path, media_url
@@ -40,7 +40,8 @@ log = get_logger("admin.catalog")
 
 
 def _serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> TutorialAdminOut:
-    """The dashboard's view of one tutorial, with a preview URL it can play.
+    """
+    The dashboard's view of one tutorial, with a preview URL it can play.
 
     Uploaded videos have no `video_url` in the database — by design, since a
     playable address for a private file is a signed, expiring, per-viewer
@@ -52,14 +53,13 @@ def _serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> Tutori
     data = TutorialAdminOut.model_validate(tutorial)
     if tutorial.file_key and not tutorial.video_url:
         data.video_url = stream_url(tutorial, viewer_id)
+    data.thumbnail_url = resolve_thumbnail(tutorial, viewer_id)
     return data
 
 
 def _image_url(program: Program) -> str | None:
     """Whichever artwork the coach supplied: an upload wins over a pasted link."""
     if program.image_key:
-        # See the comment on `upload_program_image`'s return value — the real
-        # route has no `/public` segment.
         return media_url(api_path("programs", str(program.id), "image"))
     return program.image_external_url
 
@@ -158,9 +158,11 @@ async def delete_program(
     db: DbSession,
     hard: bool = Query(False),
 ) -> None:
-    """Archiving is the default. A plan someone is currently paying for keeps its
+    """
+    Archiving is the default. A plan someone is currently paying for keeps its
     row so their assigned training block still resolves; `hard=true` is refused
-    while anybody is on it."""
+    while anybody is on it.
+    """
     program = await db.get(Program, program_id)
     if program is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That plan was not found.")
@@ -188,7 +190,6 @@ async def delete_program(
     program.is_accepting_clients = False
     log.info("admin.program_archived", program_id=str(program_id), by=str(coach.id))
 
-
 @router.post("/programs/reorder")
 async def reorder_programs(
     payload: list[uuid.UUID], coach: CurrentCoach, db: DbSession
@@ -201,9 +202,7 @@ async def reorder_programs(
     await db.flush()
     return {"status": "saved"}
 
-
 # --- Video tutorials ----------------------------------------------------------
-
 
 @router.get("/tutorials", response_model=list[TutorialAdminOut])
 async def list_tutorials(
@@ -301,10 +300,21 @@ async def update_tutorial(
     if "thumbnail_url" in updates and updates["thumbnail_url"] is not None:
         updates["thumbnail_url"] = str(updates["thumbnail_url"])
 
+    superseded = [
+        current
+        for field, current in (("file_key", tutorial.file_key),
+                               ("thumbnail_key", tutorial.thumbnail_key))
+        if current and field in updates and updates[field] != current
+    ]
+
     for field, value in updates.items():
         setattr(tutorial, field, value)
     await db.flush()
     await db.refresh(tutorial)
+
+    for key in superseded:
+        storage.delete_file(key)
+
     return _serialise_tutorial(tutorial, coach.id)
 
 
@@ -317,6 +327,11 @@ async def delete_tutorial(
     tutorial = await db.get(VideoTutorial, tutorial_id)
     if tutorial is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
+
+    for key in (tutorial.file_key, tutorial.thumbnail_key):
+        if key:
+            storage.delete_file(key)
+
     await db.delete(tutorial)
     log.info("admin.tutorial_deleted", tutorial_id=str(tutorial_id), by=str(coach.id))
 
@@ -366,7 +381,8 @@ async def upload_tutorial_video(
     coach: CurrentCoach,
     file: UploadFile = File(...),
 ) -> dict:
-    """Take a video file and return the key to attach to a tutorial.
+    """
+    Take a video file and return the key to attach to a tutorial.
 
     Deliberately a separate step from creating the tutorial: a 400 MB upload
     should not be re-sent because the title field failed validation. The client
@@ -375,3 +391,23 @@ async def upload_tutorial_video(
     key, content_type, size = await storage.save_tutorial_video(file)
     log.info("admin.tutorial_video_uploaded", key=key, bytes=size)
     return {"file_key": key, "content_type": content_type, "size_bytes": size}
+
+
+@router.post("/tutorials/poster", status_code=status.HTTP_201_CREATED)
+async def upload_tutorial_poster(
+    coach: CurrentCoach,
+    file: UploadFile = File(...),
+) -> dict:
+    """
+    Take a poster frame and return the key to attach to a tutorial.
+
+    The dashboard captures this from the chosen video in the browser and sends
+    it here as a JPEG, so an uploaded clip gets a real still instead of a grey
+    play icon. Also the endpoint behind "replace thumbnail", which is why it
+    accepts any image rather than only something canvas-generated — a coach who
+    wants a specific frame, or a title card, should not be overruled by the
+    automatic capture.
+    """
+    key, size, width, height = await storage.save_tutorial_poster(file)
+    log.info("admin.tutorial_poster_uploaded", key=key, bytes=size)
+    return {"thumbnail_key": key, "size_bytes": size, "width": width, "height": height}

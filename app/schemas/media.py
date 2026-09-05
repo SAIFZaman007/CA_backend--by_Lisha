@@ -1,4 +1,6 @@
-"""Video tutorial payloads — read models for clients, write models for the coach."""
+"""
+Video tutorial payloads — read models for clients, write models for the coach.
+"""
 
 import re
 import uuid
@@ -8,8 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, mod
 
 from app.models.enums import Equipment, TrainingLevel, TutorialCategory, VideoProvider
 
-# Accepts the four shapes people actually paste: watch links, share links,
-# /embed/ links and bare IDs on the query string.
 _YOUTUBE_ID = re.compile(
     r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"
 )
@@ -24,7 +24,6 @@ def detect_provider(url: str) -> VideoProvider:
         return VideoProvider.VIMEO
     return VideoProvider.DIRECT
 
-
 def extract_video_id(url: str) -> str | None:
     """The bare ID, used to build an embed URL and a free thumbnail."""
     match = _YOUTUBE_ID.search(url) or _VIMEO_ID.search(url)
@@ -38,7 +37,6 @@ def default_thumbnail(url: str) -> str | None:
         if video_id:
             return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
     return None
-
 
 class TutorialOut(BaseModel):
     """What a client sees. Note there is no `created_by` — the coach trades as
@@ -67,6 +65,7 @@ class TutorialOut(BaseModel):
 class TutorialAdminOut(TutorialOut):
     """Adds the operational columns the dashboard needs."""
 
+    thumbnail_key: str | None = None
     is_published: bool
     sort_order: int
     view_count: int
@@ -76,15 +75,13 @@ class TutorialAdminOut(TutorialOut):
 
 class TutorialCreate(BaseModel):
     title: str = Field(min_length=2, max_length=160)
-    # Exactly one source: a hosting link, or the key returned by the upload
-    # endpoint. Enforced below rather than left to the database, so the coach
-    # gets a sentence instead of an integrity error.
     video_url: HttpUrl | None = None
     file_key: str | None = Field(default=None, max_length=300)
     summary: str | None = Field(default=None, max_length=300)
     description: str | None = Field(default=None, max_length=6000)
     category: TutorialCategory = TutorialCategory.FORM_TECHNIQUE
     thumbnail_url: HttpUrl | None = None
+    thumbnail_key: str | None = Field(default=None, max_length=300)
     duration_seconds: int | None = Field(default=None, ge=1, le=86_400)
     target_muscle: str | None = Field(default=None, max_length=80)
     equipment: Equipment | None = None
@@ -130,6 +127,7 @@ class TutorialUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=6000)
     category: TutorialCategory | None = None
     thumbnail_url: HttpUrl | None = None
+    thumbnail_key: str | None = Field(default=None, max_length=300)
     duration_seconds: int | None = Field(default=None, ge=1, le=86_400)
     target_muscle: str | None = Field(default=None, max_length=80)
     equipment: Equipment | None = None

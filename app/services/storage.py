@@ -1,4 +1,5 @@
-"""Local disk storage for private and public media.
+"""
+Local disk storage for private and public media.
 
 Photos are private. Files are written outside the web root and served only
 through an authenticated endpoint, never as static assets. Swap this module
@@ -24,9 +25,9 @@ def _root() -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-
 def _guard_image_type(upload: UploadFile) -> None:
-    """Reject the wrong sort of file before reading a single byte of it.
+    """
+    Reject the wrong sort of file before reading a single byte of it.
 
     The declared content type is only a header and is not trusted on its own —
     `_normalise` decoding the bytes with Pillow is the real check. This just
@@ -38,7 +39,6 @@ def _guard_image_type(upload: UploadFile) -> None:
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Upload a JPEG, PNG or WebP image.",
         )
-
 
 async def _read_within_limit(upload: UploadFile, limit_mb: int) -> bytes:
     raw = await upload.read()
@@ -52,9 +52,9 @@ async def _read_within_limit(upload: UploadFile, limit_mb: int) -> bytes:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That file was empty.")
     return raw
 
-
 def _normalise(raw: bytes, destination: Path, *, max_side: int, quality: int) -> tuple[int, int]:
-    """Decode, strip metadata, orient, downscale, write JPEG. Returns (w, h).
+    """
+    Decode, strip metadata, orient, downscale, write JPEG. Returns (w, h).
 
     `exif_transpose` runs before the EXIF is dropped. Phone cameras record
     orientation in EXIF rather than rotating the pixels, so converting first
@@ -73,7 +73,6 @@ def _normalise(raw: bytes, destination: Path, *, max_side: int, quality: int) ->
             status.HTTP_400_BAD_REQUEST, detail="That file could not be read as an image."
         ) from exc
 
-
 async def save_progress_photo(
     client_id: uuid.UUID, upload: UploadFile, on_date: date
 ) -> tuple[str, str, int]:
@@ -91,9 +90,9 @@ async def save_progress_photo(
     key = f"{client_id}/{on_date.isoformat()}/{filename}"
     return key, "image/jpeg", destination.stat().st_size
 
-
 def resolve_path(key: str, *, not_found_message: str = "That file could not be found.") -> Path:
-    """Resolve a stored key to a path, refusing anything that escapes the root.
+    """
+    Resolve a stored key to a path, refusing anything that escapes the root.
 
     `not_found_message` lets each caller phrase the 404 in the language of the
     thing it was actually serving — "That video could not be found." reads very
@@ -123,21 +122,15 @@ def delete_file(key: str) -> None:
     except HTTPException:
         pass
 
-
 # --- Message attachments ------------------------------------------------------
-#
-# A client photographing a loaded bar, a meal, or their setup mid-set. Private
-# health-adjacent data: same treatment as a check-in photo — written under the
-# sender's own directory, never served as a static file, only ever reachable
-# through a signed, short-lived URL bound to one viewer and one attachment.
 
 MESSAGE_IMAGE_MAX = 1600
-
 
 async def save_message_image(
     sender_id: uuid.UUID, upload: UploadFile
 ) -> tuple[str, str, int, int, int]:
-    """Store a message image. Returns (key, content_type, bytes, width, height).
+    """
+    Store a message image. Returns (key, content_type, bytes, width, height).
 
     The client's filename is never used to build the path — it is recorded in
     the database for display only. A filename is attacker-controlled input, and
@@ -159,16 +152,12 @@ async def save_message_image(
 
 
 # --- Gallery ------------------------------------------------------------------
-#
-# Public marketing imagery — the Hall of the Coach. Unlike everything above,
-# these are meant to be crawled and cached, so they are stored under a flat
-# public prefix and served with long cache headers and no authentication.
 
 GALLERY_IMAGE_MAX = 1800
 
-
 async def save_gallery_image(upload: UploadFile) -> tuple[str, int, int, int]:
-    """Store a gallery image. Returns (key, bytes, width, height).
+    """
+    Store a gallery image. Returns (key, bytes, width, height).
 
     Dimensions come back because the public page needs them to reserve layout
     space before the bytes land. Without that the grid reflows as each image
@@ -180,9 +169,6 @@ async def save_gallery_image(upload: UploadFile) -> tuple[str, int, int, int]:
 
     directory = _root() / "gallery"
     directory.mkdir(parents=True, exist_ok=True)
-    # Random rather than derived from the row id: replacing an image writes a
-    # new file, so a URL cached at the edge for a year can never serve the
-    # photo that used to be in that slot.
     filename = f"{secrets.token_urlsafe(14)}.jpg"
     destination = directory / filename
 
@@ -191,14 +177,8 @@ async def save_gallery_image(upload: UploadFile) -> tuple[str, int, int, int]:
 
 
 # --- Coaching videos ----------------------------------------------------------
-#
-# The coach can either paste a hosting link or upload the file itself. Uploads
-# stream to disk in chunks rather than being read into memory: a 500 MB lift
-# demo read with `await upload.read()` would put 500 MB in the worker's heap and
-# take the API down under two concurrent uploads.
 
 VIDEO_CHUNK = 1024 * 1024  # 1 MB
-
 
 async def save_tutorial_video(upload: UploadFile) -> tuple[str, str, int]:
     """Stream an uploaded video to disk. Returns (key, content_type, bytes)."""
@@ -249,14 +229,40 @@ async def save_tutorial_video(upload: UploadFile) -> tuple[str, str, int]:
 
     return f"tutorials/{filename}", upload.content_type, written
 
+# --- Tutorial poster frames ---------------------------------------------------
+
+POSTER_MAX = 960
+
+async def save_tutorial_poster(upload: UploadFile) -> tuple[str, int, int, int]:
+    """
+    Store a poster frame. Returns (key, bytes, width, height).
+
+    Downscaled harder than a gallery image because it is only ever shown in a
+    card at roughly 16:9 and a few hundred pixels wide. Passed through the same
+    `_normalise` path as every other image, so a poster is decoded and re-encoded
+    rather than trusted — the endpoint that accepts this is authenticated, but
+    "the coach uploaded it" is not a reason to write unexamined bytes to disk.
+    """
+    _guard_image_type(upload)
+    raw = await _read_within_limit(upload, settings.MAX_UPLOAD_MB)
+
+    directory = _root() / "tutorials" / "posters"
+    directory.mkdir(parents=True, exist_ok=True)
+    filename = f"{secrets.token_urlsafe(14)}.jpg"
+    destination = directory / filename
+
+    width, height = _normalise(raw, destination, max_side=POSTER_MAX, quality=80)
+    return f"tutorials/posters/{filename}", destination.stat().st_size, width, height
+
 
 # --- Programme artwork --------------------------------------------------------
 
 PROGRAM_IMAGE_MAX = 1400
 
-
 async def save_program_image(program_id: uuid.UUID, upload: UploadFile) -> tuple[str, int]:
-    """Validate, downscale and store a tier's hero image. Returns (key, bytes)."""
+    """
+    Validate, downscale and store a tier's hero image. Returns (key, bytes).
+    """
     _guard_image_type(upload)
     raw = await _read_within_limit(upload, settings.MAX_UPLOAD_MB)
 
