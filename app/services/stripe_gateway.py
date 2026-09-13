@@ -154,6 +154,19 @@ async def create_checkout_session(
         raise _fail(exc) from exc
 
 
+async def retrieve_checkout_session(session_id: str):
+    """Fetch a Checkout Session from Stripe.
+
+    Used by the success-page endpoint to confirm a payment actually
+    completed rather than trusting the redirect URL alone.
+    """
+    client = _client()
+    try:
+        return client.checkout.Session.retrieve(session_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
 async def create_billing_portal_session(*, customer_id: str, return_url: str) -> str:
     """Stripe's own portal for changing a card or cancelling.
 

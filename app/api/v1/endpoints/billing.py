@@ -81,6 +81,19 @@ async def payment_history(user: CurrentUser, db: DbSession) -> list[dict]:
     ]
 
 
+@router.get("/checkout/{session_id}")
+async def checkout_status(session_id: str) -> dict:
+    """Whether a specific Stripe Checkout Session actually completed payment.
+
+    Called by the success page right after the Stripe redirect, to confirm
+    with Stripe instead of trusting the URL alone. As the module docstring
+    says: the webhook is what grants access — this endpoint only decides
+    what message to show the browser while it waits.
+    """
+    session = await stripe_gateway.retrieve_checkout_session(session_id)
+    return {"paid": session.payment_status == "paid"}
+
+
 # --- Buying --------------------------------------------------------------------
 
 
@@ -133,8 +146,8 @@ async def start_checkout(payload: dict, user: CurrentUser, db: DbSession) -> dic
         user_id=str(user.id),
         program_id=str(program.id),
         mode=mode,
-        success_url=f"{settings.FRONTEND_URL}/portal/billing?checkout=success",
-        cancel_url=f"{settings.FRONTEND_URL}/programmes/{program.slug}?checkout=cancelled",
+        success_url=f"{settings.FRONTEND_URL}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{settings.FRONTEND_URL}/checkout/cancelled?program={program.slug}",
     )
 
     log.info("billing.checkout_started", user_id=str(user.id), program_id=str(program.id))
@@ -288,7 +301,7 @@ async def webhook(
     db.add(record)
     await db.flush()
 
-    obj = event["data"]["object"]
+    obj = event["data"]["object"].to_dict()
     client_id: uuid.UUID | None = None
 
     if event_type in {
@@ -366,7 +379,7 @@ async def webhook(
         log.info(
             "billing.entitlement_synced",
             user_id=str(client_id),
-            event=event_type,
+            stripe_event_type=event_type,
             level=level.value if level else None,
         )
 

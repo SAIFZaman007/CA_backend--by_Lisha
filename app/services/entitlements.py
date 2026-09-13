@@ -119,6 +119,9 @@ class Entitlement:
                         else None
                     ),
                     "cancel_at_period_end": subscription.cancel_at_period_end,
+                    "started_at": (
+                        subscription.started_at.isoformat() if subscription.started_at else None
+                    ),
                 }
                 if subscription
                 else None
