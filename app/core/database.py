@@ -2,7 +2,7 @@
 
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, MetaData, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -31,12 +31,60 @@ class UUIDMixin:
     )
 
 
+def _utcnow() -> datetime:
+    """Timezone-aware now, evaluated in Python rather than by the database.
+
+    See `TimestampMixin` below for why that distinction is load-bearing.
+    """
+    return datetime.now(UTC)
+
+
 class TimestampMixin:
+    """`created_at` / `updated_at` on every row.
+
+    Both timestamps are generated **in Python**, not by a SQL expression, and
+    that is the whole point of this docstring — the previous version used
+    `onupdate=func.now()` and it was silently breaking every write endpoint in
+    the application.
+
+    Here is the mechanism. When `onupdate` is a SQL expression, SQLAlchemy
+    cannot know the value the database computed, so after the UPDATE statement
+    flushes it marks the attribute **expired**. The next time anything reads
+    `obj.updated_at` the ORM has to go back to the database to fetch it. In a
+    synchronous app that is an invisible extra SELECT. In an async app it is a
+    crash: the ORM attempts I/O from a plain attribute access, outside any
+    `await`, and SQLAlchemy raises
+
+        MissingGreenlet: greenlet_spawn has not been called;
+        can't call await_only() here.
+
+    Every admin endpoint that mutates a row and then serialises it — which is
+    all of them — read `updated_at` immediately after `await db.flush()`. So
+    every PATCH, every reorder, every toggle returned 500. INSERTs were
+    unaffected, because on PostgreSQL SQLAlchemy 2.x fetches insert defaults
+    eagerly via RETURNING, which is exactly why "add an image" worked while
+    "hide an image" did not.
+
+    A Python-side `default`/`onupdate` is assigned to the instance before the
+    statement is emitted, so nothing is ever expired and nothing ever needs a
+    round trip. `server_default=func.now()` is deliberately kept so that rows
+    written outside the ORM — a migration, a psql session, a bulk `INSERT` —
+    still get correct timestamps. No schema change and no migration is
+    required for this: `onupdate` never existed in the DDL, only in the ORM.
+    """
+
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=_utcnow,
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
     )
 
 

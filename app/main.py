@@ -16,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.v1.router import api_router
@@ -62,24 +63,10 @@ app = FastAPI(
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
-# --- Middleware ---------------------------------------------------------------
-
 app.state.limiter = limiter
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Range", "If-Range"],
-    expose_headers=["X-Request-ID", "Content-Range", "Accept-Ranges", "Content-Length"],
-    max_age=600,
-)
-
-if settings.is_production:
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+# --- Request context ----------------------------------------------------------
 
 
 def _public_origin(request: Request) -> str:
@@ -126,9 +113,16 @@ def _public_origin(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
-@app.middleware("http")
 async def request_context(request: Request, call_next):
-    """Tag every request with an ID, time it, and set security headers."""
+    """
+    Tag every request with an ID, time it, and set security headers.
+
+    The `X-Request-ID` is echoed on the failure response as well as the success
+    one. When the coach reports "it says it cannot reach the server", that id
+    is the single string that ties their screenshot to a stack trace in the
+    container log — without it, diagnosing an intermittent 500 in production
+    means guessing at timestamps.
+    """
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
     started = time.perf_counter()
@@ -138,12 +132,19 @@ async def request_context(request: Request, call_next):
     try:
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — this is the last line of defence
             log.exception("request.failed", method=request.method)
             structlog.contextvars.clear_contextvars()
+
+            detail = "Something went wrong on our side. Try again in a moment."
+            body: dict[str, str] = {"detail": detail, "request_id": request_id}
+            if not settings.is_production:
+                body["error"] = f"{type(exc).__name__}: {exc}"
+
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Something went wrong on our side. Try again in a moment."},
+                content=body,
+                headers={"X-Request-ID": request_id},
             )
 
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -192,6 +193,25 @@ async def request_context(request: Request, call_next):
         return response
     finally:
         reset_request_origin(origin_token)
+
+
+# --- Middleware ---------------------------------------------------------------
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=request_context)
+
+if settings.is_production:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Range", "If-Range"],
+    expose_headers=["X-Request-ID", "Content-Range", "Accept-Ranges", "Content-Length"],
+    max_age=600,
+)
 
 
 # --- Error handling -----------------------------------------------------------

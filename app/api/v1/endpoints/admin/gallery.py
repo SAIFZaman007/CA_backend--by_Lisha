@@ -1,8 +1,18 @@
-"""Gallery management — the coach's side of the Hall of the Coach.
+"""
+Gallery management — the coach's side of the Hall of the Coach.
 
 Add, edit, reorder, publish and delete, all from the dashboard. Upload is its
 own endpoint for the same reason tutorial video upload is: the bytes go up
 first and independently, so a slip in the title field never costs a re-upload.
+
+Note on the 500s this file used to return: they were not caused here. Every
+write path ended in `_admin_out(image)`, which reads `image.updated_at`
+straight after `await db.flush()`. The old `TimestampMixin` used a SQL-side
+`onupdate`, which expires that attribute after an UPDATE and makes the read
+attempt lazy I/O from async code — `MissingGreenlet`, surfacing as a 500 that
+the browser then reported as a CORS error. The fix is in
+`app/core/database.py`; the changes here are correctness and UX improvements
+that were worth making at the same time.
 """
 
 import uuid
@@ -30,7 +40,8 @@ log = get_logger("admin.gallery")
 
 
 async def _unique_slug(db: DbSession, title: str, *, exclude: uuid.UUID | None = None) -> str:
-    """A URL-safe slug that is not already taken.
+    """
+    A URL-safe slug that is not already taken.
 
     Two photos legitimately share a title — "Week 12" happens every quarter —
     so a collision is normal operation rather than an error worth surfacing.
@@ -66,7 +77,8 @@ async def upload_gallery_image(
     coach: CurrentCoach,
     file: UploadFile = File(...),
 ) -> GalleryUploadOut:
-    """Store the bytes and hand back the key the create form submits.
+    """
+    Store the bytes and hand back the key the create form submits.
 
     Dimensions come back with it so the create form can show a real preview,
     and so `width`/`height` land on the row — the public grid needs them to
@@ -92,10 +104,22 @@ async def list_gallery(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[GalleryImageAdminOut]:
+    """
+    Every image, in the order a visitor will actually see them.
+
+    This ordering deliberately mirrors `list_images` in the public router
+    exactly — featured first, then `sort_order`, then newest. It used to sort
+    by `category` first, which meant the "#1, #2, #3" badges and the move
+    up/down arrows in the dashboard described a sequence that existed nowhere
+    else: the coach would promote a photo to the top of their screen and the
+    website would carry on showing something else at the top. An ordering tool
+    that does not reflect the thing being ordered is worse than no tool.
+    Category is still available as a filter, which is what it was really for.
+    """
     stmt = (
         select(GalleryImage)
         .order_by(
-            GalleryImage.category,
+            GalleryImage.is_featured.desc(),
             GalleryImage.sort_order,
             GalleryImage.created_at.desc(),
         )
@@ -115,9 +139,6 @@ async def list_gallery(
 async def create_gallery_image(
     payload: GalleryImageCreate, coach: CurrentCoach, db: DbSession
 ) -> GalleryImageAdminOut:
-    # Confirm the uploaded file is really there before writing a row that
-    # points at it. Otherwise a stale key from an abandoned tab produces a
-    # gallery entry that renders as a broken image on the public page.
     storage.resolve_path(payload.image_key)
 
     data = payload.model_dump()
@@ -143,15 +164,16 @@ async def update_gallery_image(
 
     updates = payload.model_dump(exclude_unset=True)
 
-    # Replacing the file: verify the new one, then delete the old one only
-    # after the row has been repointed. Deleting first would leave a gap where
-    # the page has no image at all if the write below fails.
+    for required in ("image_key", "title", "alt_text", "category"):
+        if required in updates and updates[required] is None:
+            del updates[required]
+            
     old_key: str | None = None
-    if "image_key" in updates and updates["image_key"] and updates["image_key"] != image.image_key:
+    if "image_key" in updates and updates["image_key"] != image.image_key:
         storage.resolve_path(updates["image_key"])
         old_key = image.image_key
 
-    if "title" in updates and updates["title"]:
+    if "title" in updates:
         image.slug = await _unique_slug(db, updates["title"], exclude=image.id)
 
     for field, value in updates.items():
@@ -161,7 +183,7 @@ async def update_gallery_image(
     if old_key:
         storage.delete_file(old_key)
 
-    log.info("gallery.updated", image_id=str(image_id))
+    log.info("gallery.updated", image_id=str(image_id), fields=sorted(updates))
     return _admin_out(image)
 
 
@@ -169,12 +191,20 @@ async def update_gallery_image(
 async def reorder_gallery(
     payload: GalleryReorder, coach: CurrentCoach, db: DbSession
 ) -> list[GalleryImageAdminOut]:
-    """Persist a drag-and-drop reorder as one transaction.
+    """
+    Persist a reorder as one transaction.
 
     Position is taken from the order of the submitted ids rather than from a
     per-item index the client calculates. The client already knows the order —
-    it just dragged it — and recomputing indices here removes an entire class
-    of off-by-one bug where two items claim position 3.
+    it just moved something — and recomputing indices here removes an entire
+    class of off-by-one bug where two items claim position 3.
+
+    The dashboard may be filtered to one category when the coach reorders, in
+    which case only that category's ids arrive. Numbering them from zero would
+    quietly shuffle them past every unfiltered image, so positions start from
+    the lowest `sort_order` already held by the submitted set. A full-list
+    reorder starts at zero exactly as before; a filtered one stays put
+    relative to everything else.
     """
     rows = (
         (await db.execute(select(GalleryImage).where(GalleryImage.id.in_(payload.ids))))
@@ -189,10 +219,12 @@ async def reorder_gallery(
             detail="One of those images no longer exists. Refresh and try again.",
         )
 
+    base = min((row.sort_order for row in rows), default=0)
     for position, image_id in enumerate(payload.ids):
-        by_id[image_id].sort_order = position
+        by_id[image_id].sort_order = base + position
     await db.flush()
 
+    log.info("gallery.reordered", count=len(payload.ids))
     return [_admin_out(by_id[image_id]) for image_id in payload.ids]
 
 
