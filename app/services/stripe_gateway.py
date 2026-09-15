@@ -9,20 +9,6 @@ key is read in exactly one place, the rest of the codebase never imports
 Prices are created lazily from the `programs` table rather than being managed by
 hand in the Stripe dashboard. The coach edits a tier in the coach dashboard and
 the correct Stripe price follows, so the two catalogues cannot drift.
-
-Division of responsibility
---------------------------
-This module performs Stripe operations and returns plain data. It does not
-decide policy — whether a change counts as an upgrade, whether a downgrade
-should be deferred, what a client is entitled to afterwards. That all lives in
-`billing.py` and `entitlements.py`, where it can be read and changed without
-anyone having to understand the Stripe SDK.
-
-The one rule that is enforced here, because it is a Stripe mechanic rather than
-a business rule: **proration behaviour is always explicit.** Stripe's default
-for a subscription item change is `create_prorations`, which silently issues a
-credit or a charge. Leaving that implicit is how a downgrade ends up refunding
-money nobody intended to refund.
 """
 
 from __future__ import annotations
@@ -46,7 +32,6 @@ def is_configured() -> bool:
     """Whether live calls are possible. False in a dev environment with no keys."""
     return bool(stripe and settings.STRIPE_SECRET_KEY)
 
-
 def _client():
     if not is_configured():
         raise HTTPException(
@@ -56,6 +41,38 @@ def _client():
     stripe.api_key = settings.STRIPE_SECRET_KEY
     stripe.api_version = "2024-06-20"
     return stripe
+
+VALID_INTERVALS = frozenset({"day", "week", "month", "year"})
+ONE_OFF = "once"
+
+
+def _as_dict(obj: Any) -> dict[str, Any]:
+    """
+    Normalise a Stripe resource into a plain dict at the boundary.
+
+    This exists because of a change in stripe-python v12+: `StripeObject` no
+    longer pretends to be a dict. `obj["items"]` still works, but `obj.get(...)`
+    now raises
+
+        'get' is a dict method, but a Subscription is not a dict.
+        Use .to_dict() to convert it.
+
+    which is what turned every upgrade and downgrade into a 502. The failure is
+    nasty because indexing keeps working, so the code looks dict-shaped and
+    passes review, and only the `.get()` calls — the ones guarding optional
+    fields — blow up. Mixing the two access styles in the same function is how
+    that hides.
+
+    So the rule for this module is: **convert once, at the point the object
+    arrives, and work in plain dicts from there.** Callers outside this file
+    then never hold a Stripe resource at all, which also means a future SDK
+    change of this kind can only ever break this one file.
+    """
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    return dict(obj)
 
 
 def _fail(exc: Exception) -> HTTPException:
@@ -72,7 +89,8 @@ def _fail(exc: Exception) -> HTTPException:
 
 
 async def ensure_customer(*, email: str, name: str, user_id: str) -> str:
-    """Find or create the Stripe customer for a user.
+    """
+    Find or create the Stripe customer for a user.
 
     `user_id` goes into metadata so a webhook can always map an event back to a
     local account even if the email has since changed.
@@ -92,7 +110,8 @@ async def ensure_customer(*, email: str, name: str, user_id: str) -> str:
 async def ensure_price(
     *, program_id: str, name: str, price_cents: int, currency: str, interval: str
 ) -> str:
-    """Return a Stripe price id matching this tier, creating one if needed.
+    """
+    Return a Stripe price id matching this tier, creating one if needed.
 
     Stripe prices are immutable, so a change of amount means a *new* price
     rather than an edit. Looking up by the amount plus the program id means a
@@ -100,6 +119,17 @@ async def ensure_price(
     minting a fresh one on every checkout.
     """
     client = _client()
+
+    if interval != ONE_OFF and interval not in VALID_INTERVALS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"This plan's billing period is set to \"{interval}\", which is not a valid "
+                "billing cycle. Set it to month, year, week, day or once in the coach "
+                "dashboard and try again."
+            ),
+        )
+
     lookup = f"program_{program_id}_{price_cents}_{currency}_{interval}"
 
     try:
@@ -120,7 +150,7 @@ async def ensure_price(
             product=product_id,
             unit_amount=price_cents,
             currency=currency,
-            recurring=None if interval == "once" else {"interval": interval},
+            recurring=None if interval == ONE_OFF else {"interval": interval},
             lookup_key=lookup,
             metadata={"program_id": program_id},
         )
@@ -130,7 +160,6 @@ async def ensure_price(
 
 
 # --- Checkout -----------------------------------------------------------------
-
 
 async def create_checkout_session(
     *,
@@ -142,7 +171,8 @@ async def create_checkout_session(
     success_url: str,
     cancel_url: str,
 ) -> dict[str, Any]:
-    """Open a Stripe Checkout session and return its id and URL.
+    """
+    Open a Stripe Checkout session and return its id and URL.
 
     Card details never touch our servers — the client is redirected to Stripe
     and comes back with nothing more sensitive than a session id, which keeps
@@ -158,9 +188,6 @@ async def create_checkout_session(
             cancel_url=cancel_url,
             allow_promotion_codes=True,
             client_reference_id=user_id,
-            # Repeated on the subscription too: `checkout.session.completed`
-            # carries session metadata, later lifecycle events carry the
-            # subscription's, and both paths need to resolve the tier.
             metadata={"user_id": user_id, "program_id": program_id},
             subscription_data=(
                 {"metadata": {"user_id": user_id, "program_id": program_id}}
@@ -181,16 +208,16 @@ async def retrieve_checkout_session(session_id: str):
     """
     client = _client()
     try:
-        return client.checkout.Session.retrieve(session_id)
+        return _as_dict(client.checkout.Session.retrieve(session_id))
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
 
 # --- Reading a subscription ---------------------------------------------------
 
-
 async def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
-    """The live subscription, with its item and price expanded.
+    """
+    The live subscription, with its item and price expanded.
 
     Expanding here rather than making a second call matters for a plan change:
     modifying a subscription requires the *item* id, not the subscription id,
@@ -198,10 +225,11 @@ async def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
     """
     client = _client()
     try:
-        subscription = client.Subscription.retrieve(
-            subscription_id, expand=["items.data.price", "default_payment_method"]
+        return _as_dict(
+            client.Subscription.retrieve(
+                subscription_id, expand=["items.data.price", "default_payment_method"]
+            )
         )
-        return subscription.to_dict() if hasattr(subscription, "to_dict") else dict(subscription)
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
@@ -209,7 +237,8 @@ async def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
 async def preview_plan_change(
     *, subscription_id: str, new_price_id: str
 ) -> dict[str, Any]:
-    """What an immediate switch to `new_price_id` would cost, right now.
+    """
+    What an immediate switch to `new_price_id` would cost, right now.
 
     Stripe calls this an upcoming-invoice preview. Showing it before the client
     confirms is the difference between "Upgrade" and "Upgrade — you will be
@@ -223,14 +252,18 @@ async def preview_plan_change(
     """
     client = _client()
     try:
-        subscription = client.Subscription.retrieve(subscription_id)
+        subscription = _as_dict(client.Subscription.retrieve(subscription_id))
         item_id = subscription["items"]["data"][0]["id"]
 
-        invoice = client.Invoice.upcoming(
-            customer=subscription["customer"],
-            subscription=subscription_id,
-            subscription_items=[{"id": item_id, "price": new_price_id, "quantity": 1}],
-            subscription_proration_behavior="create_prorations",
+        invoice = _as_dict(
+            client.Invoice.create_preview(
+                customer=subscription["customer"],
+                subscription=subscription_id,
+                subscription_details={
+                    "items": [{"id": item_id, "price": new_price_id, "quantity": 1}],
+                    "proration_behavior": "create_prorations",
+                },
+            )
         )
         return {
             "amount_due_cents": invoice.get("amount_due") or 0,
@@ -250,7 +283,6 @@ async def preview_plan_change(
 
 # --- Changing a plan ----------------------------------------------------------
 
-
 async def change_subscription_price(
     *,
     subscription_id: str,
@@ -258,7 +290,8 @@ async def change_subscription_price(
     program_id: str,
     prorate: bool,
 ) -> dict[str, Any]:
-    """Move a live subscription onto a different price, effective immediately.
+    """
+    Move a live subscription onto a different price, effective immediately.
 
     Used for upgrades. `prorate=True` charges the difference for the remainder
     of the current period, which is what someone expects when they pay more to
@@ -277,7 +310,7 @@ async def change_subscription_price(
     """
     client = _client()
     try:
-        subscription = client.Subscription.retrieve(subscription_id)
+        subscription = _as_dict(client.Subscription.retrieve(subscription_id))
         item_id = subscription["items"]["data"][0]["id"]
         metadata = dict(subscription.get("metadata") or {})
         metadata["program_id"] = program_id
@@ -290,7 +323,7 @@ async def change_subscription_price(
             metadata=metadata,
             expand=["items.data.price"],
         )
-        return updated.to_dict() if hasattr(updated, "to_dict") else dict(updated)
+        return _as_dict(updated)
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
@@ -298,7 +331,8 @@ async def change_subscription_price(
 async def schedule_price_change(
     *, subscription_id: str, new_price_id: str, program_id: str
 ) -> dict[str, Any]:
-    """Queue a price change for the start of the next billing period.
+    """
+    Queue a price change for the start of the next billing period.
 
     Used for downgrades. The client keeps the tier they have paid for until the
     period they paid for ends — removing features the moment someone clicks
@@ -315,7 +349,7 @@ async def schedule_price_change(
     """
     client = _client()
     try:
-        subscription = client.Subscription.retrieve(subscription_id)
+        subscription = _as_dict(client.Subscription.retrieve(subscription_id))
         current_price = subscription["items"]["data"][0]["price"]["id"]
         period_end = subscription["current_period_end"]
         metadata = dict(subscription.get("metadata") or {})
@@ -332,8 +366,7 @@ async def schedule_price_change(
                     "end_date": period_end,
                     "proration_behavior": "none",
                 },
-                # Phase two is the new tier, starting the instant the old one
-                # ends. No proration: nothing is being changed mid-period.
+
                 {
                     "items": [{"price": new_price_id, "quantity": 1}],
                     "start_date": period_end,
@@ -345,14 +378,15 @@ async def schedule_price_change(
         return {
             "schedule_id": schedule.id,
             "effective_at": period_end,
-            "raw": updated.to_dict() if hasattr(updated, "to_dict") else dict(updated),
+            "raw": _as_dict(updated),
         }
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
 
 async def release_schedule(schedule_id: str) -> None:
-    """Drop a queued change. Used when a client cancels a pending downgrade.
+    """
+    Drop a queued change. Used when a client cancels a pending downgrade.
 
     Releasing detaches the schedule and leaves the subscription exactly as it
     is — the correct outcome for "actually, keep me where I am". Failures are
@@ -372,7 +406,8 @@ async def release_schedule(schedule_id: str) -> None:
 async def cancel_subscription(
     *, subscription_id: str, at_period_end: bool = True, reason: str | None = None
 ) -> dict:
-    """Cancel, by default at the end of the paid period.
+    """
+    Cancel, by default at the end of the paid period.
 
     The reason is written to Stripe's own cancellation_details as well as our
     database, so churn reporting in the Stripe dashboard matches what the coach
@@ -381,18 +416,21 @@ async def cancel_subscription(
     client = _client()
     try:
         if at_period_end:
-            return client.Subscription.modify(
-                subscription_id,
-                cancel_at_period_end=True,
-                cancellation_details={"comment": reason} if reason else None,
+            return _as_dict(
+                client.Subscription.modify(
+                    subscription_id,
+                    cancel_at_period_end=True,
+                    cancellation_details={"comment": reason} if reason else None,
+                )
             )
-        return client.Subscription.cancel(subscription_id)
+        return _as_dict(client.Subscription.cancel(subscription_id))
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
 
 async def resume_subscription(subscription_id: str) -> dict:
-    """Undo a pending cancellation.
+    """
+    Undo a pending cancellation.
 
     Only meaningful while the subscription is still running — once Stripe has
     actually ended it there is nothing to resume and the client buys again.
@@ -401,7 +439,7 @@ async def resume_subscription(subscription_id: str) -> dict:
     """
     client = _client()
     try:
-        return client.Subscription.modify(subscription_id, cancel_at_period_end=False)
+        return _as_dict(client.Subscription.modify(subscription_id, cancel_at_period_end=False))
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
@@ -412,7 +450,8 @@ async def resume_subscription(subscription_id: str) -> dict:
 async def create_billing_portal_session(
     *, customer_id: str, return_url: str, flow: str | None = None
 ) -> str:
-    """Stripe's own portal for cards, invoices and cancellation.
+    """
+    Stripe's own portal for cards, invoices and cancellation.
 
     Cheaper and safer than rebuilding card management, and it stays correct as
     Stripe's requirements change.
@@ -437,7 +476,8 @@ async def create_billing_portal_session(
 
 
 async def get_payment_method(customer_id: str) -> dict[str, Any] | None:
-    """Brand, last four and expiry of the card currently on file.
+    """
+    Brand, last four and expiry of the card currently on file.
 
     Returns None rather than raising. A billing page that cannot render because
     the card lookup failed is worse than one that shows every other detail and
@@ -445,7 +485,11 @@ async def get_payment_method(customer_id: str) -> dict[str, Any] | None:
     """
     client = _client()
     try:
-        customer = client.Customer.retrieve(customer_id, expand=["invoice_settings.default_payment_method"])
+        customer = _as_dict(
+            client.Customer.retrieve(
+                customer_id, expand=["invoice_settings.default_payment_method"]
+            )
+        )
         method = (customer.get("invoice_settings") or {}).get("default_payment_method")
 
         if not method:
@@ -455,7 +499,7 @@ async def get_payment_method(customer_id: str) -> dict[str, Any] | None:
         if not method:
             return None
 
-        card = (method.get("card") if isinstance(method, dict) else method.card) or {}
+        card = _as_dict(method).get("card") or {}
         return {
             "brand": card.get("brand"),
             "last4": card.get("last4"),
@@ -469,7 +513,8 @@ async def get_payment_method(customer_id: str) -> dict[str, Any] | None:
 
 
 async def list_invoices(*, customer_id: str, limit: int = 24) -> list[dict[str, Any]]:
-    """Invoices straight from Stripe, for reconciliation.
+    """
+    Invoices straight from Stripe, for reconciliation.
 
     Day-to-day billing history is served from the local `payments` table, which
     is faster and survives Stripe being unreachable. This exists for the cases
@@ -492,7 +537,7 @@ async def list_invoices(*, customer_id: str, limit: int = 24) -> list[dict[str, 
                 "hosted_invoice_url": inv.get("hosted_invoice_url"),
                 "invoice_pdf": inv.get("invoice_pdf"),
             }
-            for inv in invoices.data
+            for inv in (_as_dict(raw) for raw in invoices.data)
         ]
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
@@ -502,7 +547,8 @@ async def list_invoices(*, customer_id: str, limit: int = 24) -> list[dict[str, 
 
 
 def verify_webhook(payload: bytes, signature: str) -> dict:
-    """Verify a webhook's signature and return the event.
+    """
+    Verify a webhook's signature and return the event.
 
     This is the whole security boundary for billing: the endpoint is public, so
     an unsigned or badly-signed body must never be trusted. Anyone who could

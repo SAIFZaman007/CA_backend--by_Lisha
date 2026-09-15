@@ -6,6 +6,7 @@ read models here are deliberately explicit about what leaves the database.
 """
 
 import uuid
+from typing import Literal
 from datetime import date, datetime, time
 
 from pydantic import (
@@ -193,7 +194,8 @@ class ClientAccountUpdate(BaseModel):
 
 
 class CoachProfileUpdate(BaseModel):
-    """Everything the coach may set on a client's record.
+    """
+    Everything the coach may set on a client's record.
 
     Wider than the client's own `ClientProfileUpdate`: the coach owns level,
     phase, macro targets and the private coaching notes.
@@ -233,10 +235,6 @@ class CoachProfileUpdate(BaseModel):
 
 class PlanExerciseIn(BaseModel):
     exercise_id: uuid.UUID
-    # A demonstration for *this* client's version of the movement, overriding
-    # the library's. Optional because the library link covers nearly every
-    # case; when both are absent the save is refused outright — see
-    # `app.services.programming.assert_every_movement_has_video`.
     video_url: HttpUrl | None = None
     sets: int = Field(default=3, ge=1, le=12)
     rep_range: str = Field(default="8-12", max_length=30)
@@ -253,7 +251,6 @@ class PlanDayIn(BaseModel):
     estimated_minutes: int = Field(default=55, ge=10, le=240)
     exercises: list[PlanExerciseIn] = Field(default_factory=list, max_length=30)
 
-
 class WorkoutPlanIn(BaseModel):
     name: str = Field(min_length=2, max_length=140)
     level: TrainingLevel = TrainingLevel.LEVEL_1
@@ -263,7 +260,6 @@ class WorkoutPlanIn(BaseModel):
     program_id: uuid.UUID | None = None
     is_active: bool = True
     days: list[PlanDayIn] = Field(default_factory=list, max_length=14)
-
 
 class PlanExerciseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -279,11 +275,7 @@ class PlanExerciseOut(BaseModel):
     tempo: str | None = None
     target_weight_kg: float | None = None
     coach_note: str | None = None
-    # Always populated on a saved plan. The write path refuses anything that
-    # cannot resolve one, so the client portal can render the "watch this"
-    # button unconditionally rather than hiding it half the time.
     video_url: str | None = None
-
 
 class PlanDayOut(BaseModel):
     id: uuid.UUID
@@ -293,7 +285,6 @@ class PlanDayOut(BaseModel):
     order_index: int
     estimated_minutes: int
     exercises: list[PlanExerciseOut]
-
 
 class WorkoutPlanOut(BaseModel):
     id: uuid.UUID
@@ -309,7 +300,6 @@ class WorkoutPlanOut(BaseModel):
 
 
 # --- Meal plans ---------------------------------------------------------------
-
 
 class MealIn(BaseModel):
     day_of_week: int = Field(ge=0, le=6)
@@ -367,6 +357,8 @@ class MealPlanOut(BaseModel):
 
 # --- Pricing plans (programs) -------------------------------------------------
 
+BillingPeriod = Literal["month", "year", "week", "day", "once"]
+
 
 class ProgramIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
@@ -375,7 +367,7 @@ class ProgramIn(BaseModel):
     days_per_week: int = Field(ge=1, le=7)
     session_minutes: int = Field(default=55, ge=10, le=240)
     price_cents: int = Field(ge=0, le=10_000_000)
-    billing_period: str = Field(default="month", max_length=20)
+    billing_period: BillingPeriod = "month"
     description: str = Field(min_length=2, max_length=6000)
     features: list[str] = Field(default_factory=list, max_length=20)
     best_for: str | None = Field(default=None, max_length=200)
@@ -392,7 +384,7 @@ class ProgramUpdate(BaseModel):
     days_per_week: int | None = Field(default=None, ge=1, le=7)
     session_minutes: int | None = Field(default=None, ge=10, le=240)
     price_cents: int | None = Field(default=None, ge=0, le=10_000_000)
-    billing_period: str | None = Field(default=None, max_length=20)
+    billing_period: BillingPeriod | None = None
     description: str | None = Field(default=None, min_length=2, max_length=6000)
     features: list[str] | None = Field(default=None, max_length=20)
     best_for: str | None = Field(default=None, max_length=200)
