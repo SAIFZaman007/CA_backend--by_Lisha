@@ -1,4 +1,5 @@
-"""Thin wrapper over the Stripe SDK.
+"""
+Thin wrapper over the Stripe SDK.
 
 Everything that talks to Stripe goes through here, for three reasons: the API
 key is read in exactly one place, the rest of the codebase never imports
@@ -8,6 +9,20 @@ key is read in exactly one place, the rest of the codebase never imports
 Prices are created lazily from the `programs` table rather than being managed by
 hand in the Stripe dashboard. The coach edits a tier in the coach dashboard and
 the correct Stripe price follows, so the two catalogues cannot drift.
+
+Division of responsibility
+--------------------------
+This module performs Stripe operations and returns plain data. It does not
+decide policy — whether a change counts as an upgrade, whether a downgrade
+should be deferred, what a client is entitled to afterwards. That all lives in
+`billing.py` and `entitlements.py`, where it can be read and changed without
+anyone having to understand the Stripe SDK.
+
+The one rule that is enforced here, because it is a Stripe mechanic rather than
+a business rule: **proration behaviour is always explicit.** Stripe's default
+for a subscription item change is `create_prorations`, which silently issues a
+credit or a charge. Leaving that implicit is how a downgrade ends up refunding
+money nobody intended to refund.
 """
 
 from __future__ import annotations
@@ -53,6 +68,9 @@ def _fail(exc: Exception) -> HTTPException:
     )
 
 
+# --- Customers and prices -----------------------------------------------------
+
+
 async def ensure_customer(*, email: str, name: str, user_id: str) -> str:
     """Find or create the Stripe customer for a user.
 
@@ -65,9 +83,7 @@ async def ensure_customer(*, email: str, name: str, user_id: str) -> str:
         if existing.data:
             return existing.data[0].id
 
-        created = client.Customer.create(
-            email=email, name=name, metadata={"user_id": user_id}
-        )
+        created = client.Customer.create(email=email, name=name, metadata={"user_id": user_id})
         return created.id
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
@@ -111,6 +127,9 @@ async def ensure_price(
         return price.id
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
+
+
+# --- Checkout -----------------------------------------------------------------
 
 
 async def create_checkout_session(
@@ -167,30 +186,319 @@ async def retrieve_checkout_session(session_id: str):
         raise _fail(exc) from exc
 
 
-async def create_billing_portal_session(*, customer_id: str, return_url: str) -> str:
-    """Stripe's own portal for changing a card or cancelling.
+# --- Reading a subscription ---------------------------------------------------
 
-    Cheaper and safer than rebuilding card management, and it stays correct as
-    Stripe's requirements change.
+
+async def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
+    """The live subscription, with its item and price expanded.
+
+    Expanding here rather than making a second call matters for a plan change:
+    modifying a subscription requires the *item* id, not the subscription id,
+    and fetching it separately doubles the latency of every upgrade.
     """
     client = _client()
     try:
-        session = client.billing_portal.Session.create(
-            customer=customer_id, return_url=return_url
+        subscription = client.Subscription.retrieve(
+            subscription_id, expand=["items.data.price", "default_payment_method"]
         )
+        return subscription.to_dict() if hasattr(subscription, "to_dict") else dict(subscription)
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
+async def preview_plan_change(
+    *, subscription_id: str, new_price_id: str
+) -> dict[str, Any]:
+    """What an immediate switch to `new_price_id` would cost, right now.
+
+    Stripe calls this an upcoming-invoice preview. Showing it before the client
+    confirms is the difference between "Upgrade" and "Upgrade — you will be
+    charged $23.40 today, then $99 monthly from 14 March". A subscription
+    change that bills an unexplained amount is the single most common source of
+    payment disputes, and the preview costs one API call to avoid.
+
+    Returns zeroes rather than raising if the preview is unavailable, because a
+    missing preview should degrade the confirmation dialog, not block the
+    upgrade.
+    """
+    client = _client()
+    try:
+        subscription = client.Subscription.retrieve(subscription_id)
+        item_id = subscription["items"]["data"][0]["id"]
+
+        invoice = client.Invoice.upcoming(
+            customer=subscription["customer"],
+            subscription=subscription_id,
+            subscription_items=[{"id": item_id, "price": new_price_id, "quantity": 1}],
+            subscription_proration_behavior="create_prorations",
+        )
+        return {
+            "amount_due_cents": invoice.get("amount_due") or 0,
+            "currency": invoice.get("currency") or settings.STRIPE_CURRENCY,
+            "next_payment_attempt": invoice.get("next_payment_attempt"),
+            "period_end": invoice.get("period_end"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stripe.preview_unavailable", error=str(exc))
+        return {
+            "amount_due_cents": None,
+            "currency": settings.STRIPE_CURRENCY,
+            "next_payment_attempt": None,
+            "period_end": None,
+        }
+
+
+# --- Changing a plan ----------------------------------------------------------
+
+
+async def change_subscription_price(
+    *,
+    subscription_id: str,
+    new_price_id: str,
+    program_id: str,
+    prorate: bool,
+) -> dict[str, Any]:
+    """Move a live subscription onto a different price, effective immediately.
+
+    Used for upgrades. `prorate=True` charges the difference for the remainder
+    of the current period, which is what someone expects when they pay more to
+    get more today.
+
+    `payment_behavior="pending_if_incomplete"` is deliberate and load-bearing:
+    if the proration charge needs authentication (3-D Secure) or the card is
+    declined, the subscription stays on the *old* price rather than flipping to
+    the new one and going unpaid. A failed upgrade must not be able to leave a
+    client both downgraded and billed.
+
+    The tier is written into metadata on the way through, because every later
+    lifecycle event resolves the local program from subscription metadata — an
+    upgrade that changes the price but not the metadata produces a subscription
+    that bills for Level 3 and entitles Level 1.
+    """
+    client = _client()
+    try:
+        subscription = client.Subscription.retrieve(subscription_id)
+        item_id = subscription["items"]["data"][0]["id"]
+        metadata = dict(subscription.get("metadata") or {})
+        metadata["program_id"] = program_id
+
+        updated = client.Subscription.modify(
+            subscription_id,
+            items=[{"id": item_id, "price": new_price_id, "quantity": 1}],
+            proration_behavior="create_prorations" if prorate else "none",
+            payment_behavior="pending_if_incomplete",
+            metadata=metadata,
+            expand=["items.data.price"],
+        )
+        return updated.to_dict() if hasattr(updated, "to_dict") else dict(updated)
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
+async def schedule_price_change(
+    *, subscription_id: str, new_price_id: str, program_id: str
+) -> dict[str, Any]:
+    """Queue a price change for the start of the next billing period.
+
+    Used for downgrades. The client keeps the tier they have paid for until the
+    period they paid for ends — removing features the moment someone clicks
+    "Downgrade" is both unfair and, in practice, the fastest way to generate a
+    refund request.
+
+    Implemented with a Stripe subscription schedule rather than a local timer.
+    Stripe owns the billing clock; anything that depends on our process being
+    awake at the right moment is a change that eventually does not happen.
+
+    `end_behavior="release"` returns the subscription to normal once the
+    scheduled phase begins, so the schedule is a one-shot instruction and not a
+    permanent structure to unwind later.
+    """
+    client = _client()
+    try:
+        subscription = client.Subscription.retrieve(subscription_id)
+        current_price = subscription["items"]["data"][0]["price"]["id"]
+        period_end = subscription["current_period_end"]
+        metadata = dict(subscription.get("metadata") or {})
+
+        schedule = client.SubscriptionSchedule.create(from_subscription=subscription_id)
+        updated = client.SubscriptionSchedule.modify(
+            schedule.id,
+            end_behavior="release",
+            phases=[
+                # Phase one is what they already have, running out its clock.
+                {
+                    "items": [{"price": current_price, "quantity": 1}],
+                    "start_date": subscription["current_period_start"],
+                    "end_date": period_end,
+                    "proration_behavior": "none",
+                },
+                # Phase two is the new tier, starting the instant the old one
+                # ends. No proration: nothing is being changed mid-period.
+                {
+                    "items": [{"price": new_price_id, "quantity": 1}],
+                    "start_date": period_end,
+                    "proration_behavior": "none",
+                    "metadata": {**metadata, "program_id": program_id},
+                },
+            ],
+        )
+        return {
+            "schedule_id": schedule.id,
+            "effective_at": period_end,
+            "raw": updated.to_dict() if hasattr(updated, "to_dict") else dict(updated),
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
+async def release_schedule(schedule_id: str) -> None:
+    """Drop a queued change. Used when a client cancels a pending downgrade.
+
+    Releasing detaches the schedule and leaves the subscription exactly as it
+    is — the correct outcome for "actually, keep me where I am". Failures are
+    logged rather than raised: an orphaned schedule is untidy, but refusing the
+    request because cleanup failed is worse.
+    """
+    client = _client()
+    try:
+        client.SubscriptionSchedule.release(schedule_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stripe.schedule_release_failed", schedule_id=schedule_id, error=str(exc))
+
+
+# --- Cancelling and resuming --------------------------------------------------
+
+
+async def cancel_subscription(
+    *, subscription_id: str, at_period_end: bool = True, reason: str | None = None
+) -> dict:
+    """Cancel, by default at the end of the paid period.
+
+    The reason is written to Stripe's own cancellation_details as well as our
+    database, so churn reporting in the Stripe dashboard matches what the coach
+    sees in theirs.
+    """
+    client = _client()
+    try:
+        if at_period_end:
+            return client.Subscription.modify(
+                subscription_id,
+                cancel_at_period_end=True,
+                cancellation_details={"comment": reason} if reason else None,
+            )
+        return client.Subscription.cancel(subscription_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
+async def resume_subscription(subscription_id: str) -> dict:
+    """Undo a pending cancellation.
+
+    Only meaningful while the subscription is still running — once Stripe has
+    actually ended it there is nothing to resume and the client buys again.
+    That asymmetry is why "Keep my plan" and "Subscribe" are different buttons
+    in the portal.
+    """
+    client = _client()
+    try:
+        return client.Subscription.modify(subscription_id, cancel_at_period_end=False)
+    except Exception as exc:  # noqa: BLE001
+        raise _fail(exc) from exc
+
+
+# --- Payment methods and invoices ---------------------------------------------
+
+
+async def create_billing_portal_session(
+    *, customer_id: str, return_url: str, flow: str | None = None
+) -> str:
+    """Stripe's own portal for cards, invoices and cancellation.
+
+    Cheaper and safer than rebuilding card management, and it stays correct as
+    Stripe's requirements change.
+
+    `flow="payment_method_update"` deep-links straight to the card form rather
+    than dropping the client on a menu. That matters most in the one case where
+    it is used: a client who has just been told their payment failed should land
+    on the field that fixes it, not on a page where they have to find it.
+    """
+    client = _client()
+    try:
+        params: dict[str, Any] = {"customer": customer_id, "return_url": return_url}
+        if flow == "payment_method_update":
+            params["flow_data"] = {
+                "type": "payment_method_update",
+                "after_completion": {"type": "redirect", "redirect": {"return_url": return_url}},
+            }
+        session = client.billing_portal.Session.create(**params)
         return session.url
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
 
 
-async def cancel_subscription(*, subscription_id: str, at_period_end: bool = True) -> dict:
+async def get_payment_method(customer_id: str) -> dict[str, Any] | None:
+    """Brand, last four and expiry of the card currently on file.
+
+    Returns None rather than raising. A billing page that cannot render because
+    the card lookup failed is worse than one that shows every other detail and
+    omits the card.
+    """
     client = _client()
     try:
-        if at_period_end:
-            return client.Subscription.modify(subscription_id, cancel_at_period_end=True)
-        return client.Subscription.cancel(subscription_id)
+        customer = client.Customer.retrieve(customer_id, expand=["invoice_settings.default_payment_method"])
+        method = (customer.get("invoice_settings") or {}).get("default_payment_method")
+
+        if not method:
+            methods = client.PaymentMethod.list(customer=customer_id, type="card", limit=1)
+            method = methods.data[0] if methods.data else None
+
+        if not method:
+            return None
+
+        card = (method.get("card") if isinstance(method, dict) else method.card) or {}
+        return {
+            "brand": card.get("brand"),
+            "last4": card.get("last4"),
+            "exp": f"{card.get('exp_month'):02d}/{card.get('exp_year')}"
+            if card.get("exp_month") and card.get("exp_year")
+            else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stripe.payment_method_unavailable", error=str(exc))
+        return None
+
+
+async def list_invoices(*, customer_id: str, limit: int = 24) -> list[dict[str, Any]]:
+    """Invoices straight from Stripe, for reconciliation.
+
+    Day-to-day billing history is served from the local `payments` table, which
+    is faster and survives Stripe being unreachable. This exists for the cases
+    where the local projection might be incomplete — a webhook that was missed
+    while the service was down, or a coach checking why a client says they were
+    charged and we have no record of it.
+    """
+    client = _client()
+    try:
+        invoices = client.Invoice.list(customer=customer_id, limit=limit)
+        return [
+            {
+                "id": inv.get("id"),
+                "number": inv.get("number"),
+                "status": inv.get("status"),
+                "amount_paid": inv.get("amount_paid"),
+                "amount_due": inv.get("amount_due"),
+                "currency": inv.get("currency"),
+                "created": inv.get("created"),
+                "hosted_invoice_url": inv.get("hosted_invoice_url"),
+                "invoice_pdf": inv.get("invoice_pdf"),
+            }
+            for inv in invoices.data
+        ]
     except Exception as exc:  # noqa: BLE001
         raise _fail(exc) from exc
+
+
+# --- Webhook ------------------------------------------------------------------
 
 
 def verify_webhook(payload: bytes, signature: str) -> dict:
@@ -211,9 +519,7 @@ def verify_webhook(payload: bytes, signature: str) -> dict:
         )
 
     try:
-        return stripe.Webhook.construct_event(
-            payload, signature, settings.STRIPE_WEBHOOK_SECRET
-        )
+        return stripe.Webhook.construct_event(payload, signature, settings.STRIPE_WEBHOOK_SECRET)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Malformed payload.") from exc
     except Exception as exc:  # noqa: BLE001 - stripe.SignatureVerificationError

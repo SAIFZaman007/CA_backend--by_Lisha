@@ -14,10 +14,11 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, or_, select
 
-from app.core.deps import CurrentAdmin, CurrentCoach, DbSession
+from app.core.config import settings
+from app.core.deps import CurrentAdmin, CurrentCoach, DbSession, OptionalUser
 from app.core.logging import get_logger
 from app.core.media import api_path, media_url
-from app.core.security import hash_password
+from app.core.security import hash_password, sign_media_url, verify_media_token
 from app.models.engagement import Message, MessageThread
 from app.models.enums import SessionStatus, TrainingLevel, UserRole
 from app.models.nutrition import MealPlan
@@ -257,6 +258,55 @@ async def create_client(payload: ClientCreate, admin: CurrentAdmin, db: DbSessio
 # --- One client ---------------------------------------------------------------
 
 
+# Which accounts may look at a client's private check-in photos. A frozenset
+# rather than a tuple comparison so the rule reads the same here as it does in
+# `messages.py`, where the identical question is asked of message attachments.
+STAFF_ROLES: frozenset[UserRole] = frozenset({UserRole.COACH, UserRole.ADMIN})
+
+
+def _photo_url(client_id: uuid.UUID, photo: ProgressPhoto, viewer_id: uuid.UUID) -> str:
+    """A short-lived, signed address for one check-in photo.
+
+    This used to be an unsigned path to an endpoint guarded by `CurrentCoach`,
+    which meant the only way to display the image was to `fetch()` it with an
+    Authorization header and pass the blob to `URL.createObjectURL`. That has
+    three problems, and all three were live:
+
+      * An `Authorization` header makes the request non-simple, so the browser
+        sends a CORS preflight first. The dashboard and the API are on
+        different origins, so every thumbnail depended on `OPTIONS` being
+        allowed for that exact origin. With the dashboard's origin missing
+        from `CORS_ORIGINS`, every photo failed with `net::ERR_FAILED` and a
+        preflight error — which reads like a network fault rather than the
+        configuration problem it is.
+      * A blob URL is uncacheable and has to be revoked by hand. Miss one and
+        the decoded bitmap stays in memory for the life of the tab.
+      * It hands the access token to code that only wanted to draw a picture.
+
+    A signed URL removes all of it. `<img src>` is a simple request: no
+    preflight, no header, no CORS dependency, no fetch. The signature is bound
+    to this one photo and this one viewer and expires with
+    `MEDIA_URL_TTL_SECONDS`, so a copied link is useless by the time it is
+    pasted anywhere.
+
+    This is exactly the mechanism the client portal has always used for the
+    same file. The two sides disagreed, and the coach's side was the one that
+    was wrong.
+    """
+    token = sign_media_url(photo.id, viewer_id, settings.MEDIA_URL_TTL_SECONDS)
+    return media_url(
+        api_path(
+            "admin",
+            "clients",
+            str(client_id),
+            "photos",
+            str(photo.id),
+            "file",
+            query=f"token={token}",
+        )
+    )
+
+
 @router.get("/{client_id}", response_model=ClientDetail)
 async def client_detail(
     client_id: uuid.UUID,
@@ -456,9 +506,7 @@ async def client_detail(
                 id=p.id,
                 log_date=p.log_date,
                 pose=p.pose.value,
-                url=media_url(
-                    api_path("admin", "clients", str(client_id), "photos", str(p.id), "file")
-                ),
+                url=_photo_url(client_id, p, coach.id),
                 note=p.note,
             )
             for p in photos
@@ -568,10 +616,38 @@ async def force_password(
 
 @router.get("/{client_id}/photos/{photo_id}/file")
 async def client_photo(
-    client_id: uuid.UUID, photo_id: uuid.UUID, coach: CurrentCoach, db: DbSession
+    client_id: uuid.UUID,
+    photo_id: uuid.UUID,
+    db: DbSession,
+    user: OptionalUser,
+    token: str | None = Query(None),
 ) -> FileResponse:
-    """Check-in photos are private files, never static assets. They are streamed
-    through this authenticated route or not at all."""
+    """Stream one private check-in photo.
+
+    Two ways in, and both are authenticated. A bearer token identifies a
+    scripted caller; a signed `token` query parameter identifies an `<img>`
+    tag, which cannot send a header. `OptionalUser` here is not "optional
+    auth" — if neither credential resolves to an active staff account,
+    nothing is served.
+
+    The signature is verified against *this* photo id, so a token minted for
+    one image cannot be replayed against another. Role and active status are
+    re-checked on every request rather than trusted from the signature: a
+    token stays cryptographically valid until it expires, and switching off a
+    coach's account has to take effect before then.
+    """
+    viewer: User | None = user
+    if viewer is None and token:
+        viewer_id = verify_media_token(token, photo_id)
+        if viewer_id is not None:
+            viewer = await db.get(User, viewer_id)
+
+    if viewer is None or not viewer.is_active or viewer.role not in STAFF_ROLES:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="This photo link has expired. Reload the page.",
+        )
+
     photo = await db.get(ProgressPhoto, photo_id)
     if photo is None or photo.client_id != client_id or not photo.shared_with_coach:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found.")

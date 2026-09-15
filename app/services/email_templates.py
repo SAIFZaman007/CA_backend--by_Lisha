@@ -363,3 +363,94 @@ def coach_new_lead(
         footnote="Enquiries answered within one business day convert roughly twice as often.",
     )
     return subject, text, html
+
+
+def payment_failed(
+    name: str,
+    amount: str,
+    retry_text: str,
+    reason: str | None,
+    update_url: str,
+) -> tuple[str, str, str]:
+    """The most valuable email this system sends.
+
+    A failed renewal is almost never a decision — it is an expired card, a new
+    bank, a travel block. The subscription is lost only if nobody tells the
+    person in time. So this email does three things and nothing else: says what
+    failed, says when the last automatic retry happens, and links straight to
+    the card form. No marketing, no apology paragraph, one button.
+    """
+    subject = f"Action needed: your {settings.BRAND_NAME} payment did not go through"
+
+    text = (
+        f"Hi {name},\n\n"
+        f"We could not take the {amount} payment for your {settings.BRAND_NAME} plan.\n"
+        + (f"Reason given by the bank: {reason}\n" if reason else "")
+        + f"\n{retry_text}\n\n"
+        "Your coaching is still active in the meantime — nothing has been switched off.\n\n"
+        f"Update your card here:\n{update_url}\n\n"
+        f"— {settings.BRAND_NAME} | {settings.BUSINESS_NAME}"
+    )
+
+    paragraphs = [
+        f"We could not take the <strong style=\"color:{CHALK_50};\">{escape(amount)}</strong> "
+        f"payment for your {escape(settings.BRAND_NAME)} plan.",
+    ]
+    if reason:
+        paragraphs.append(f"Your bank said: {escape(reason)}")
+    paragraphs.append(escape(retry_text))
+    paragraphs.append(
+        "Your coaching is still active while this is sorted out — nothing has been "
+        "switched off, and no training has been lost."
+    )
+
+    html = render(
+        preheader=f"We could not take your {amount} payment. Update your card to keep training.",
+        eyebrow="Payment problem",
+        heading="Your payment did not go through",
+        paragraphs=paragraphs,
+        cta_label="Update your card",
+        cta_url=update_url,
+        footnote=(
+            "Nine times out of ten this is an expired card rather than anything wrong. "
+            "It takes about a minute to fix."
+        ),
+    )
+    return subject, text, html
+
+
+def subscription_cancelled(name: str, program_name: str, resubscribe_url: str) -> tuple[str, str, str]:
+    """Sent when the subscription actually ends, not when cancellation is requested.
+
+    The gap matters. Cancelling schedules an ending; this confirms it has
+    happened. Sending it at request time would tell someone their coaching had
+    stopped three weeks before it did.
+    """
+    subject = f"Your {settings.BRAND_NAME} plan has ended"
+
+    text = (
+        f"Hi {name},\n\n"
+        f"Your {program_name} plan has now ended and you will not be charged again.\n\n"
+        "Your logged training, weights and check-in photos are all still on your account. "
+        "Nothing has been deleted.\n\n"
+        f"If you want to pick things back up:\n{resubscribe_url}\n\n"
+        f"— {settings.BRAND_NAME} | {settings.BUSINESS_NAME}"
+    )
+
+    html = render(
+        preheader="Your plan has ended. Your training history is still here.",
+        eyebrow="Plan ended",
+        heading=f"Thanks for training with us, {escape(name)}.",
+        paragraphs=[
+            f"Your {escape(program_name)} plan has ended and you will not be charged again.",
+            "Everything you logged — sessions, weights, measurements, check-in photos — is "
+            "still on your account and is not going anywhere.",
+        ],
+        cta_label="Start again",
+        cta_url=resubscribe_url,
+        footnote=(
+            "If something about the coaching did not work for you, replying to this email "
+            "reaches the coach directly. It is read."
+        ),
+    )
+    return subject, text, html
