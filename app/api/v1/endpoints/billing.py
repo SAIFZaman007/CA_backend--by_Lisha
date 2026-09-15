@@ -1,40 +1,5 @@
 """
 Subscription lifecycle: buying, changing, cancelling, paying, recovering.
-
-The old flow stopped at the sale:
-
-    pick a tier → Stripe Checkout → webhook → entitled → (nothing else, ever)
-
-That is a checkout, not a subscription product. Everything a paying customer
-expects to be able to do afterwards — move up a tier, move down, pause the
-relationship, replace a dead card, find last month's receipt — either did not
-exist or was a 409 with no route out of it. A client on Level 1 who pressed
-"Subscribe" on Level 3 was told "You already have an active plan" and given
-nowhere to go, which is the exact moment an upgrade turns into a cancellation.
-
-The principles this module encodes
-----------------------------------
-**Upgrades are immediate, downgrades are deferred.** Someone paying more to get
-more should get it now; someone paying less should keep what they already paid
-for until the period they paid for runs out. Removing features the instant a
-downgrade is requested is both unfair and the fastest route to a chargeback.
-
-**Cancellation ends at the period boundary, never on the spot.** Money already
-taken buys coaching already promised.
-
-**Stripe owns the billing clock.** Deferred changes are Stripe subscription
-schedules, not rows this application has to remember to act on. Anything that
-depends on our process being awake at the right minute is a change that
-eventually does not happen.
-
-**The webhook is the only thing that grants or removes access.** Endpoints here
-ask Stripe to do something; what actually happened comes back as an event.
-A client who closes the tab is still subscribed. A client who forges a request
-to the success URL is not.
-
-**A failed payment is a conversation, not a lockout.** `past_due` stays
-entitled (see `ENTITLING_STATUSES`) while Stripe retries and the client is told,
-by email and in the portal, exactly what to fix and by when.
 """
 
 import uuid
@@ -66,12 +31,6 @@ def _iso(value: datetime | None) -> str | None:
 
 
 # --- Request bodies -----------------------------------------------------------
-#
-# Typed, not `dict`. The old checkout endpoint took a bare dict and hand-parsed
-# a UUID out of it, which meant a malformed request produced a generic 422 with
-# no field name. These give the portal something it can attach to an input.
-
-
 class CheckoutRequest(BaseModel):
     program_id: uuid.UUID
 
@@ -81,21 +40,18 @@ class PlanChangeRequest(BaseModel):
 
 
 class CancelRequest(BaseModel):
-    # Free choice, deliberately not an enum: the set of reasons a coaching
-    # business wants to track changes far more often than a database migration
-    # is worth. Validated for length only.
     reason: str | None = Field(default=None, max_length=60)
     comment: str | None = Field(default=None, max_length=1000)
 
 
 # --- Shared helpers -----------------------------------------------------------
 
-
 LEVEL_RANK = {"level_1": 1, "level_2": 2, "level_3": 3}
 
 
 def _rank(program: Program | None) -> int:
-    """Where a tier sits on the ladder. Higher is more.
+    """
+    Where a tier sits on the ladder. Higher is more.
 
     Ranked by `level` rather than by price, because the ladder is a product
     decision and the price is a marketing one. A promotional month where
@@ -137,7 +93,8 @@ def _payment_row(payment: Payment) -> dict:
 
 
 async def _subscription_summary(db: DbSession, subscription: Subscription | None) -> dict | None:
-    """Everything the billing screen renders about one subscription.
+    """
+    Everything the billing screen renders about one subscription.
 
     The card details come from Stripe rather than the local cache when a
     customer id is available, because a card replaced through Stripe's portal
@@ -224,7 +181,8 @@ async def my_entitlement(user: CurrentUser, db: DbSession) -> dict:
 
 @router.get("/summary")
 async def billing_summary(user: CurrentUser, db: DbSession) -> dict:
-    """One request that renders the whole billing page.
+    """
+    One request that renders the whole billing page.
 
     Subscription, available plans with each one already classified as the
     current plan / an upgrade / a downgrade, the card on file, and the last few
@@ -264,16 +222,15 @@ async def billing_summary(user: CurrentUser, db: DbSession) -> dict:
                 "features": program.features,
                 "is_current": is_current,
                 "is_available": program.is_accepting_clients,
-                # Drives the verb on the button. Getting this from the server
-                # means "Upgrade" and "Downgrade" always agree with what the
-                # change endpoint will actually do.
                 "change_type": (
                     "current"
                     if is_current
+                    else "subscribe"
+                    if subscription is None
                     else "upgrade"
                     if rank > current_rank
                     else "downgrade"
-                    if current_rank and rank < current_rank
+                    if rank < current_rank
                     else "subscribe"
                 ),
             }
@@ -304,7 +261,8 @@ async def billing_summary(user: CurrentUser, db: DbSession) -> dict:
 async def payment_history(
     user: CurrentUser, db: DbSession, limit: int = Query(50, ge=1, le=200)
 ) -> list[dict]:
-    """Full billing history from the local projection.
+    """
+    Full billing history from the local projection.
 
     Local rather than a call to Stripe on every page load: it is one indexed
     query, it renders instantly, and it still works when Stripe is having a bad
@@ -328,7 +286,8 @@ async def payment_history(
 
 @router.get("/invoices")
 async def invoices(user: CurrentUser, db: DbSession) -> list[dict]:
-    """Invoices read live from Stripe.
+    """
+    Invoices read live from Stripe.
 
     Used to reconcile when the local history looks incomplete — typically after
     a webhook was missed while the service was down. Returns an empty list
@@ -357,16 +316,89 @@ async def invoices(user: CurrentUser, db: DbSession) -> list[dict]:
 
 
 @router.get("/checkout/{session_id}")
-async def checkout_status(session_id: str) -> dict:
-    """Whether a specific Stripe Checkout Session actually completed payment.
+async def checkout_status(session_id: str, user: CurrentUser, db: DbSession) -> dict:
+    """
+    Confirm a Checkout Session with Stripe — and reconcile it if it is paid.
 
-    Called by the success page right after the Stripe redirect, to confirm
-    with Stripe instead of trusting the URL alone. As the module docstring
-    says: the webhook is what grants access — this endpoint only decides
-    what message to show the browser while it waits.
+    Called by the success page immediately after the Stripe redirect.
+
+    The redirect proves nothing: anyone can open that URL. So the session is
+    fetched from Stripe and checked, and the signed-in user must be the one it
+    was opened for. Without that ownership check, pasting somebody else's
+    session id into this endpoint would attach their subscription to your
+    account.
     """
     session = await stripe_gateway.retrieve_checkout_session(session_id)
-    return {"paid": session.payment_status == "paid"}
+    session = session.to_dict() if hasattr(session, "to_dict") else dict(session)
+
+    metadata = session.get("metadata") or {}
+    owner = session.get("client_reference_id") or metadata.get("user_id")
+    if owner and str(owner) != str(user.id):
+        # Deliberately a 404 and not a 403: confirming that a session exists but
+        # belongs to someone else is itself information worth withholding.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That checkout was not found.")
+
+    paid = session.get("payment_status") == "paid"
+    if not paid:
+        return {"paid": False, "synced": False}
+
+    synced = await _reconcile_checkout(db, session=session, user_id=user.id)
+    return {"paid": True, "synced": synced}
+
+
+async def _reconcile_checkout(db: DbSession, *, session: dict, user_id: uuid.UUID) -> bool:
+    """
+    Write a paid Checkout Session into the local projection, idempotently.
+
+    Returns whether a subscription is now on record. Never raises on a Stripe
+    hiccup: the success page must still be able to say "payment successful",
+    because it was. The webhook is the backstop if this half fails.
+    """
+    try:
+        stripe_sub_id = session.get("subscription")
+
+        if stripe_sub_id:
+            remote = await stripe_gateway.retrieve_subscription(stripe_sub_id)
+            subscription = await _upsert_subscription(db, remote)
+            if subscription is None:
+                return False
+        else:
+            # A one-off purchase has no subscription object. Guarded against
+            # double-writing if the webhook got here first.
+            metadata = session.get("metadata") or {}
+            try:
+                program_id = uuid.UUID(metadata["program_id"])
+            except (KeyError, TypeError, ValueError):
+                return False
+
+            existing = await entitlements.active_subscription(db, user_id)
+            if existing is not None:
+                return True
+
+            db.add(
+                Subscription(
+                    client_id=user_id,
+                    program_id=program_id,
+                    status=SubscriptionStatus.ACTIVE,
+                    stripe_customer_id=session.get("customer"),
+                    price_cents=session.get("amount_total") or 0,
+                    currency=session.get("currency") or settings.STRIPE_CURRENCY,
+                    billing_period="once",
+                    started_at=datetime.now(UTC),
+                )
+            )
+            await db.flush()
+
+        level = await entitlements.sync_profile_level(db, user_id)
+        log.info(
+            "billing.checkout_reconciled",
+            user_id=str(user_id),
+            level=level.value if level else None,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — the payment is real either way
+        log.error("billing.reconcile_failed", user_id=str(user_id), error=str(exc))
+        return False
 
 
 # --- Buying --------------------------------------------------------------------
@@ -393,10 +425,7 @@ async def start_checkout(payload: CheckoutRequest, user: CurrentUser, db: DbSess
 
     existing = await entitlements.active_subscription(db, user.id)
     if existing is not None:
-        # Still a 409 — this is genuinely not a checkout — but the response now
-        # tells the client what to do instead of ending the conversation. The
-        # portal reads `action` and redirects to the change-plan flow, which is
-        # the difference between an upgrade and a cancellation.
+
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
@@ -440,7 +469,8 @@ async def start_checkout(payload: CheckoutRequest, user: CurrentUser, db: DbSess
 async def preview_change(
     payload: PlanChangeRequest, user: CurrentUser, db: DbSession
 ) -> dict:
-    """What would happen if the client switched to this tier, before they commit.
+    """
+    What would happen if the client switched to this tier, before they commit.
 
     Nobody should press a button that charges their card without being told the
     number first. For an upgrade this returns the prorated amount due today; for
@@ -498,7 +528,8 @@ async def preview_change(
 
 @router.post("/change-plan")
 async def change_plan(payload: PlanChangeRequest, user: CurrentUser, db: DbSession) -> dict:
-    """Move between tiers.
+    """
+    Move between tiers.
 
     Up is immediate and prorated. Down is queued for the period boundary. The
     direction is decided here, from the tier ladder, and never sent by the
@@ -532,8 +563,6 @@ async def change_plan(payload: PlanChangeRequest, user: CurrentUser, db: DbSessi
     )
     is_upgrade = _rank(program) > _rank(subscription.program)
 
-    # A pending downgrade is replaced, not stacked. Two live schedules on one
-    # subscription is a state Stripe will accept and nobody can reason about.
     if subscription.stripe_schedule_id:
         await stripe_gateway.release_schedule(subscription.stripe_schedule_id)
         subscription.stripe_schedule_id = None
@@ -548,9 +577,7 @@ async def change_plan(payload: PlanChangeRequest, user: CurrentUser, db: DbSessi
             program_id=str(program.id),
             prorate=True,
         )
-        # The local row is updated optimistically so the portal reflects the
-        # change on the next render, and corrected authoritatively when
-        # `customer.subscription.updated` arrives moments later.
+
         subscription.program_id = program.id
         subscription.stripe_price_id = price_id
         subscription.price_cents = program.price_cents
@@ -610,7 +637,8 @@ async def cancel_scheduled_change(user: CurrentUser, db: DbSession) -> dict:
 
 @router.post("/cancel")
 async def cancel(payload: CancelRequest, user: CurrentUser, db: DbSession) -> dict:
-    """Cancel at the end of the paid period, never immediately.
+    """
+    Cancel at the end of the paid period, never immediately.
 
     Someone who has paid to the end of the month keeps their programme to the
     end of the month. The webhook flips the status when Stripe actually ends it,
@@ -666,7 +694,8 @@ async def resume(user: CurrentUser, db: DbSession) -> dict:
 
 @router.post("/payment-method")
 async def update_payment_method(user: CurrentUser, db: DbSession) -> dict:
-    """A one-use Stripe link that opens straight on the card form.
+    """
+    A one-use Stripe link that opens straight on the card form.
 
     Deep-linked rather than dropping the client on the portal's menu. The
     single most common reason anyone follows this link is that their card was
@@ -782,9 +811,6 @@ async def _upsert_subscription(db: DbSession, obj: dict) -> Subscription | None:
         recurring = price.get("recurring") or {}
         subscription.billing_period = recurring.get("interval") or subscription.billing_period
 
-    # The tier follows the metadata, which `change_subscription_price` and the
-    # scheduled phase both keep current. Without this, an upgrade would change
-    # what the client is billed and not what they are entitled to.
     incoming_program = metadata.get("program_id")
     if incoming_program:
         try:
@@ -793,9 +819,7 @@ async def _upsert_subscription(db: DbSession, obj: dict) -> Subscription | None:
             program_id = None
         if program_id and program_id != subscription.program_id:
             subscription.program_id = program_id
-            # A scheduled downgrade that has now taken effect is no longer
-            # scheduled. Clearing it here is what stops the portal showing
-            # "moving to Level 1 on 14 March" forever after 14 March.
+
             if subscription.scheduled_program_id == program_id:
                 subscription.scheduled_program_id = None
                 subscription.scheduled_price_cents = None
@@ -813,7 +837,8 @@ async def _upsert_subscription(db: DbSession, obj: dict) -> Subscription | None:
 
 
 async def _record_invoice(db: DbSession, obj: dict, *, paid: bool) -> Subscription | None:
-    """Write one invoice into the local billing history.
+    """
+    Write one invoice into the local billing history.
 
     Matched to a subscription by Stripe's subscription id first and the
     customer id only as a fallback. Matching on customer alone — which is what
@@ -899,7 +924,8 @@ async def webhook(
     db: DbSession,
     stripe_signature: str = Header(None, alias="Stripe-Signature"),
 ) -> dict:
-    """Stripe's callback. The only thing that actually grants or removes access.
+    """
+    Stripe's callback. The only thing that actually grants or removes access.
 
     Deliberately returns 200 for anything already processed or not recognised:
     a non-2xx makes Stripe retry, and retrying an event we have chosen to ignore
@@ -917,8 +943,6 @@ async def webhook(
     event_id = event["id"]
     event_type = event["type"]
 
-    # At-least-once delivery: the unique index is what actually stops a
-    # duplicate `invoice.paid` from writing a second payment row.
     already = (
         (await db.execute(select(WebhookEvent).where(WebhookEvent.stripe_event_id == event_id)))
         .scalars()
@@ -988,11 +1012,6 @@ async def webhook(
         subscription = await _record_invoice(db, obj, paid=False)
         if subscription:
             client_id = subscription.client_id
-            # Told immediately, with the retry date and a direct link to the
-            # card form. Stripe will retry on its own schedule; the client has
-            # until the last attempt to fix it, and only knows that if we say
-            # so. This single email is the difference between recovering a
-            # failed payment and losing the subscription to an expired card.
             await send_payment_failed(
                 to=subscription.client.email,
                 name=subscription.client.full_name.split()[0],

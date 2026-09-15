@@ -450,7 +450,16 @@ async def client_detail(
             "goal": profile.goal.value,
             "activity_level": profile.activity_level.value,
             "unit_system": profile.unit_system.value,
-            "level": profile.level.value,
+            # Guarded, because `level` is the one nullable enum on this
+            # profile and a brand-new client is exactly the case where it is
+            # null. `ClientProfile.level` is written by
+            # `entitlements.sync_profile_level` from the live subscription and
+            # is None until a plan has actually been paid for — so the first
+            # thing a coach does with a new sign-up, open their record, hit
+            # `None.value` and returned a 500. Every other enum on this dict is
+            # NOT NULL with a default; `sex` is nullable and was already
+            # guarded. This was the only gap.
+            "level": profile.level.value if profile.level else None,
             "phase": profile.phase,
             "program_start_date": profile.program_start_date.isoformat()
             if profile.program_start_date
