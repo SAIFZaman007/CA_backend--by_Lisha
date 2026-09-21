@@ -142,6 +142,7 @@ class CatalogSyncOut(BaseModel):
     created: int
     backfilled: int
     unchanged: int
+    repaired_links: int = 0
     catalog_size: int
 
 

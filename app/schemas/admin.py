@@ -341,6 +341,12 @@ class MealOut(BaseModel):
     items: list[str]
 
 
+class AutoMealPlanIn(BaseModel):
+    """Options for generating a plan from the client's numbers."""
+
+    activate: bool = True
+
+
 class MealPlanOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -351,6 +357,7 @@ class MealPlanOut(BaseModel):
     fat_target_g: int
     notes: str | None = None
     is_active: bool
+    source: str = "manual"
     created_at: datetime
     meals: list[MealOut]
 

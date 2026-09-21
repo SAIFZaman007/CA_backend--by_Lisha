@@ -55,6 +55,7 @@ class MealPlanOut(BaseModel):
     carb_target_g: int
     fat_target_g: int
     notes: str | None = None
+    source: str = "manual"
     meals: list[MealOut]
 
 
@@ -339,10 +340,6 @@ class DashboardTrend(BaseModel):
 
 class DashboardOut(BaseModel):
     greeting_name: str
-    # None until a plan has been paid for. A client can sign in, complete their
-    # intake and look around before they buy anything, and the dashboard has to
-    # render for them — so this is optional rather than defaulted to LEVEL_1,
-    # which would silently show unpaid clients a tier they do not have.
     level: TrainingLevel | None = None
     phase: str | None
     program_week: int
