@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, or_, select
 
 from app.core.config import settings
@@ -630,7 +630,7 @@ async def client_photo(
     db: DbSession,
     user: OptionalUser,
     token: str | None = Query(None),
-) -> FileResponse:
+) -> Response:
     """Stream one private check-in photo.
 
     Two ways in, and both are authenticated. A bearer token identifies a
@@ -661,10 +661,11 @@ async def client_photo(
     if photo is None or photo.client_id != client_id or not photo.shared_with_coach:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found.")
 
-    return FileResponse(
-        storage.resolve_path(photo.file_key, not_found_message="Photo not found."),
+    return storage.serve(
+        photo.file_key,
+        not_found_message="Photo not found.",
         media_type=photo.content_type,
-        headers={"Cache-Control": "private, max-age=300"},
+        cache_control="private, max-age=300",
     )
 
 

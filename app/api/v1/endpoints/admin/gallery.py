@@ -139,7 +139,7 @@ async def list_gallery(
 async def create_gallery_image(
     payload: GalleryImageCreate, coach: CurrentCoach, db: DbSession
 ) -> GalleryImageAdminOut:
-    storage.resolve_path(payload.image_key)
+    storage.ensure_exists(payload.image_key, not_found_message="That upload was not found. Upload the image again.")
 
     data = payload.model_dump()
     image = GalleryImage(
@@ -170,7 +170,7 @@ async def update_gallery_image(
             
     old_key: str | None = None
     if "image_key" in updates and updates["image_key"] != image.image_key:
-        storage.resolve_path(updates["image_key"])
+        storage.ensure_exists(updates["image_key"], not_found_message="That upload was not found. Upload the image again.")
         old_key = image.image_key
 
     if "title" in updates:

@@ -1,4 +1,5 @@
-"""Writing programmes: training blocks and meal plans.
+"""
+Writing programmes: training blocks and meal plans.
 
 Both are edited as a whole document rather than row by row. The coach drags a
 day around, changes three rep ranges and presses save once — so the write path
@@ -19,6 +20,7 @@ from app.models.nutrition import Meal, MealItem, MealPlan
 from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan
 from app.models.user import User
 from app.schemas.admin import (
+    AutoMealPlanIn,
     MealOut,
     MealPlanIn,
     MealPlanOut,
@@ -27,6 +29,7 @@ from app.schemas.admin import (
     WorkoutPlanIn,
     WorkoutPlanOut,
 )
+from app.services.meal_planner import SOURCE_MANUAL, MealPlanInputError, generate_meal_plan
 from app.services.programming import assert_every_movement_has_video
 
 router = APIRouter()
@@ -388,6 +391,7 @@ def _meal_plan_out(plan: MealPlan) -> MealPlanOut:
         fat_target_g=plan.fat_target_g,
         notes=plan.notes,
         is_active=plan.is_active,
+        source=plan.source,
         created_at=plan.created_at,
         meals=[
             MealOut(
@@ -487,6 +491,7 @@ async def create_meal_plan(
         fat_target_g=payload.fat_target_g,
         notes=payload.notes,
         is_active=payload.is_active,
+        source=SOURCE_MANUAL,
     )
     db.add(plan)
     await db.flush()
@@ -501,6 +506,31 @@ async def create_meal_plan(
 
     await db.refresh(plan, ["meals"])
     log.info("admin.meal_plan_created", client_id=str(client_id), plan_id=str(plan.id))
+    return _meal_plan_out(plan)
+
+
+@router.post(
+    "/clients/{client_id}/meal-plans/auto",
+    response_model=MealPlanOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_auto_meal_plan(
+    client_id: uuid.UUID, payload: AutoMealPlanIn, coach: CurrentCoach, db: DbSession
+) -> MealPlanOut:
+    """Build a 7-day plan from the client's height, weight, age, training days
+    and goal — the same generator new clients get automatically on purchase.
+
+    Creates a new plan rather than overwriting one, so an earlier plan (the
+    coach's own included) stays in the history and can be re-activated.
+    """
+    await _require_client(db, client_id)
+    try:
+        plan = await generate_meal_plan(
+            db, client_id, assigned_by_id=coach.id, activate=payload.activate
+        )
+    except MealPlanInputError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    log.info("admin.meal_plan_auto_generated", client_id=str(client_id), plan_id=str(plan.id))
     return _meal_plan_out(plan)
 
 
@@ -521,6 +551,9 @@ async def replace_meal_plan(
     plan.notes = payload.notes
     plan.is_active = payload.is_active
     plan.assigned_by_id = coach.id
+    # Once the coach edits an automatic plan it is hers: it is never
+    # regenerated underneath her.
+    plan.source = SOURCE_MANUAL
 
     await _write_meals(db, plan, payload)
     if payload.is_active:

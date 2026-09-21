@@ -60,7 +60,9 @@ def _serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> Tutori
 def _image_url(program: Program) -> str | None:
     """Whichever artwork the coach supplied: an upload wins over a pasted link."""
     if program.image_key:
-        return media_url(api_path("programs", str(program.id), "image"))
+        return storage.public_url(program.image_key, width=1200) or media_url(
+            api_path("programs", str(program.id), "image")
+        )
     return program.image_external_url
 
 
@@ -249,12 +251,28 @@ async def list_tutorials(
     return [_serialise_tutorial(row, coach.id) for row in rows]
 
 
+def _check_uploaded_keys(data: dict) -> None:
+    """A storage key in a request body must be one our upload endpoints issued.
+
+    Keys arrive from the browser (upload first, then save the form), so they
+    are checked rather than trusted: a local key must resolve inside the
+    upload root, a Cloudinary key must sit inside this deployment's folder.
+    """
+    for field in ("file_key", "thumbnail_key"):
+        value = data.get(field)
+        if value:
+            storage.ensure_exists(
+                value, not_found_message="That upload was not found. Upload the file again."
+            )
+
+
 @router.post("/tutorials", response_model=TutorialAdminOut, status_code=status.HTTP_201_CREATED)
 async def create_tutorial(
     payload: TutorialCreate, coach: CurrentCoach, db: DbSession
 ) -> TutorialAdminOut:
     data = payload.model_dump()
     video_url = str(payload.video_url) if payload.video_url is not None else None
+    _check_uploaded_keys(data)
 
     tutorial = VideoTutorial(
         slug=await _unique_slug(db, VideoTutorial, payload.title),
@@ -282,6 +300,7 @@ async def update_tutorial(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
 
     updates = payload.model_dump(exclude_unset=True)
+    _check_uploaded_keys(updates)
 
     if updates.get("title") and updates["title"] != tutorial.title:
         tutorial.slug = await _unique_slug(
@@ -373,7 +392,7 @@ async def upload_program_image(
 
     log.info("admin.program_image_uploaded", program_id=str(program_id), bytes=size)
 
-    return {"image_url": media_url(api_path("programs", str(program_id), "image"))}
+    return {"image_url": _image_url(program)}
 
 
 @router.post("/tutorials/upload", status_code=status.HTTP_201_CREATED)

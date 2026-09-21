@@ -7,10 +7,11 @@ over the whole library rather than edits to one row.
 database. Additive and idempotent: it inserts what is missing and backfills
 blanks, and never overwrites a link or a cue the coach has edited by hand.
 
+`sync` also repairs demonstration links the catalogue itself wrote (including
+the broken slug-derived links from earlier releases) — see
+`app.services.exercise_import` for how a coach-edited link is told apart.
+
 `verify-links` HEAD-checks every demonstration URL and reports the dead ones.
-The catalogue's links are derived from a slug pattern rather than scraped — the
-source site blocks crawlers — so a handful will not resolve. This is how the
-coach finds all of them in one pass rather than one client complaint at a time.
 """
 
 from fastapi import APIRouter, Query
@@ -57,6 +58,7 @@ async def sync_exercise_catalog(
         created=report.created,
         backfilled=report.backfilled,
         unchanged=report.unchanged,
+        repaired_links=report.repaired_links,
         catalog_size=catalog_size(),
     )
 
