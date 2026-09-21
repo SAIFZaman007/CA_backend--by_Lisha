@@ -1,19 +1,26 @@
-"""Syncing the shipped exercise catalogue into the database.
-
-Two operations live here.
+"""
+Syncing the shipped exercise catalogue into the database.
 
 `sync_catalog` writes `app.data.exercise_library.CATALOG` into `exercises`,
 idempotently — it inserts what is missing and backfills columns that are still
-empty, but it never overwrites something the coach has edited by hand. That
-distinction is the whole point: running the sync after a deploy must be safe,
-and a coach who replaced a demonstration link with their own recording must not
-find it reverted the next time someone redeploys.
+empty, and it never overwrites a link or cue the coach has edited by hand.
 
-`verify_video_links` HEAD-checks every link in the library and reports the dead
-ones. The catalogue's demonstration URLs are derived from a slug pattern rather
-than scraped — the source site blocks crawlers — so a handful will not resolve.
-This is how the coach finds those in one pass instead of one client complaint at
-a time.
+How "edited by hand" is told apart from "written by the catalogue"
+------------------------------------------------------------------
+Every catalogue row stores the link it was given in *both* `video_url` and
+`source_url`. A coach replacing the demonstration changes `video_url` only.
+So, for an existing row:
+
+* `video_url` empty                          -> fill it
+* `video_url == source_url`                  -> the catalogue wrote it; repoint
+* `video_url == <old derived pattern>`       -> the pre-2026-09 guess; repair it
+* anything else                              -> the coach's own link; keep it
+
+That rule is what lets a routine deploy repair every broken derived link in an
+existing database without an explicit `overwrite_videos` run, while still
+never discarding a recording the coach pasted in.
+
+`verify_video_links` HEAD-checks every link and reports the dead ones.
 """
 
 import asyncio
@@ -30,21 +37,15 @@ from app.models.catalog import Exercise
 
 log = get_logger("exercise.import")
 
-# Politeness and self-protection. Twenty parallel HEAD requests finishes ~200
-# links in a few seconds; two hundred parallel would look like an attack from
-# the far end and would exhaust the worker's socket budget from this one.
 _LINK_CHECK_CONCURRENCY = 20
 _LINK_CHECK_TIMEOUT = 8.0
 
+_BOT_PROTECTED_STATUSES = {401, 403, 429}
 
-def derive_video_url(name: str) -> str:
-    """The demonstration guide for a movement, built from its name.
 
-    The source site's URLs are `/exercises/{slug}`, verified against known
-    pages. Deriving rather than storing a hand-written URL per row means a new
-    movement added to the catalogue gets a link for free — and means a wrong
-    one is a slug fix, not a data migration.
-    """
+def _old_derived_url(name: str) -> str:
+    """The link the previous catalogue guessed for a movement. Used only to
+    recognise — and repair — rows written by that version."""
     return f"{VIDEO_BASE}/{slugify(name)}"
 
 
@@ -53,6 +54,7 @@ class SyncReport:
     created: int = 0
     backfilled: int = 0
     unchanged: int = 0
+    repaired_links: int = 0
     skipped_names: list[str] = field(default_factory=list)
 
     @property
@@ -62,92 +64,78 @@ class SyncReport:
 
 async def sync_catalog(db: AsyncSession, *, overwrite_videos: bool = False) -> SyncReport:
     """
-    Insert missing movements and fill in blank columns on existing ones.
+    Insert missing movements, backfill blank columns, repair catalogue links.
 
-    `overwrite_videos=False` is the default and the safe one: an exercise that
-    already has a `video_url` keeps it, whatever the catalogue says. Pass True
-    only when deliberately repointing the whole library — after the source URL
-    pattern changes, for instance — and understand that it discards the coach's
-    own links.
+    `overwrite_videos=True` repoints *every* row at the catalogue link,
+    including ones the coach replaced by hand. Use only on purpose.
 
-    The caller commits. This function only flushes, because a partially applied
-    catalogue is worse than none: `flush()` without a later `commit()` looks
-    like a success in the logs and then rolls back on session close.
+    The caller commits. This function only flushes.
     """
-    
     report = SyncReport()
 
     existing = {
         row.slug: row for row in (await db.execute(select(Exercise))).scalars().all()
     }
 
-    for (
-        name,
-        group,
-        target,
-        secondary,
-        equipment,
-        mechanics,
-        force,
-        level,
-        popularity,
-        cue,
-    ) in CATALOG:
-        slug = slugify(name)
-        video_url = derive_video_url(name)
+    for movement in CATALOG:
+        slug = slugify(movement.name)
+        video_url = movement.video_url
         current = existing.get(slug)
 
         if current is None:
-            db.add(
-                Exercise(
-                    slug=slug,
-                    name=name,
-                    muscle_group=group,
-                    target_muscle=target,
-                    secondary_muscles=list(secondary),
-                    equipment=equipment,
-                    mechanics=mechanics,
-                    force_type=force,
-                    min_level=level,
-                    popularity=popularity,
-                    coaching_cue=cue,
-                    video_url=video_url,
-                    source_url=video_url,
-                    is_active=True,
-                )
+            exercise = Exercise(
+                slug=slug,
+                name=movement.name,
+                muscle_group=movement.group,
+                target_muscle=movement.target,
+                secondary_muscles=list(movement.secondary),
+                equipment=movement.equipment,
+                mechanics=movement.mechanics,
+                force_type=movement.force,
+                min_level=movement.level,
+                popularity=movement.popularity,
+                coaching_cue=movement.cue,
+                video_url=video_url,
+                source_url=video_url,
+                is_active=True,
             )
+            db.add(exercise)
+            existing[slug] = exercise
             report.created += 1
             continue
 
-        # Backfill only. Anything already set was either seeded correctly or
-        # edited on purpose, and both deserve to survive a resync.
         changed = False
 
-        if current.muscle_group != group and not current.created_by_id:
-            # A movement the coach authored keeps its own classification; one
-            # that came from this catalogue gets re-filed if the taxonomy moved.
-            current.muscle_group = group
+        if current.muscle_group != movement.group and not current.created_by_id:
+            current.muscle_group = movement.group
             changed = True
-        if not current.coaching_cue:
-            current.coaching_cue = cue
+        if not current.coaching_cue and movement.cue:
+            current.coaching_cue = movement.cue
             changed = True
         if current.mechanics is None:
-            current.mechanics = mechanics
+            current.mechanics = movement.mechanics
             changed = True
         if current.force_type is None:
-            current.force_type = force
+            current.force_type = movement.force
             changed = True
-        if not current.secondary_muscles:
-            current.secondary_muscles = list(secondary)
-            changed = True
-        if not current.source_url:
-            current.source_url = video_url
+        if not current.secondary_muscles and movement.secondary:
+            current.secondary_muscles = list(movement.secondary)
             changed = True
         if not current.popularity:
-            current.popularity = popularity
+            current.popularity = movement.popularity
             changed = True
-        if not current.video_url or overwrite_videos:
+
+        catalogue_owned = (
+            not current.video_url
+            or current.video_url == current.source_url
+            or current.video_url == _old_derived_url(current.name)
+        )
+        if (catalogue_owned or overwrite_videos) and current.video_url != video_url:
             current.video_url = video_url
+            report.repaired_links += 1
+            changed = True
+        if current.source_url != video_url:
+            current.source_url = video_url
             changed = True
 
         if changed:
@@ -160,6 +148,7 @@ async def sync_catalog(db: AsyncSession, *, overwrite_videos: bool = False) -> S
         "exercise.catalog_synced",
         created=report.created,
         backfilled=report.backfilled,
+        repaired_links=report.repaired_links,
         unchanged=report.unchanged,
     )
     return report
@@ -205,12 +194,14 @@ async def verify_video_links(db: AsyncSession, *, limit: int | None = None) -> l
                     response = await client.get(
                         url, follow_redirects=True, headers={"Range": "bytes=0-0"}
                     )
+                blocked = response.status_code in _BOT_PROTECTED_STATUSES
                 return LinkResult(
                     exercise_id=str(exercise.id),
                     name=exercise.name,
                     url=url,
                     status=response.status_code,
-                    ok=response.status_code < 400,
+                    ok=response.status_code < 400 or blocked,
+                    error="bot-protected (not verifiable from the server)" if blocked else None,
                 )
             except httpx.HTTPError as exc:
                 return LinkResult(
@@ -224,7 +215,7 @@ async def verify_video_links(db: AsyncSession, *, limit: int | None = None) -> l
 
     async with httpx.AsyncClient(
         timeout=_LINK_CHECK_TIMEOUT,
-        headers={"User-Agent": "CoachAuto-LinkCheck/1.0"},
+        headers={"User-Agent": "Mozilla/5.0 (compatible; CoachAuto-LinkCheck/1.1)"},
     ) as client:
         results = await asyncio.gather(*(check(client, row) for row in rows))
 

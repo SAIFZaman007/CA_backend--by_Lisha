@@ -1,4 +1,5 @@
-"""What a client is allowed to do, derived from what they have paid for.
+"""
+What a client is allowed to do, derived from what they have paid for.
 
 This is the single place that answers "is this person entitled to X?". Every
 guard in the API and every locked panel in the portal reads from here, so the
@@ -25,10 +26,6 @@ from app.models.enums import ENTITLING_STATUSES, TrainingLevel
 from app.models.user import ClientProfile, User
 
 # --- The feature matrix -------------------------------------------------------
-#
-# Higher tiers are supersets of lower ones, so each level lists only what it
-# adds. `features_for` walks the ladder and unions them. Adding a tier means
-# adding one row here, not hunting through route handlers.
 
 BASE_FEATURES: frozenset[str] = frozenset(
     {
@@ -59,8 +56,6 @@ LEVEL_ORDER: list[TrainingLevel] = [
     TrainingLevel.LEVEL_3,
 ]
 
-# Everything a signed-in client can reach with no subscription at all. Enough to
-# manage their account and buy a plan — nothing that constitutes coaching.
 UNSUBSCRIBED_FEATURES: frozenset[str] = frozenset({"profile", "billing", "calculators"})
 
 
@@ -130,7 +125,8 @@ class Entitlement:
 
 
 async def active_subscription(db: AsyncSession, client_id: uuid.UUID) -> Subscription | None:
-    """The live subscription for a client, if any.
+    """
+    The live subscription for a client, if any.
 
     Ordered newest-first so that an upgrade taking effect the same day resolves
     to the tier just bought rather than the one being replaced.
@@ -148,7 +144,8 @@ async def active_subscription(db: AsyncSession, client_id: uuid.UUID) -> Subscri
 
 
 async def entitlement_for(db: AsyncSession, user: User) -> Entitlement:
-    """Resolve one user's entitlement.
+    """
+    Resolve one user's entitlement.
 
     Staff are not customers. A coach or admin has no subscription and should
     still be able to open every screen, so they short-circuit to the top tier.
@@ -175,7 +172,8 @@ async def entitlement_for(db: AsyncSession, user: User) -> Entitlement:
 
 
 async def sync_profile_level(db: AsyncSession, client_id: uuid.UUID) -> TrainingLevel | None:
-    """Write the cached level onto the client's profile after a billing change.
+    """
+    Write the cached level onto the client's profile after a billing change.
 
     Called from the webhook handler. The coach's roster and plan builder read
     `profile.level` for display and for picking sensible defaults; keeping it in
@@ -195,4 +193,10 @@ async def sync_profile_level(db: AsyncSession, client_id: uuid.UUID) -> Training
         profile.level = level
 
     await db.flush()
+
+    if level is not None:
+        from app.services.meal_planner import ensure_auto_meal_plan  # noqa: PLC0415
+
+        await ensure_auto_meal_plan(db, client_id)
+
     return level

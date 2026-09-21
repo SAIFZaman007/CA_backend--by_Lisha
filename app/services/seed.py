@@ -1,4 +1,5 @@
-"""The one and only seed.
+"""
+The one and only seed.
 
 Run with `python -m app.cli seed`. No prompts, no confirmation, no
 environment check — it just runs, every time, everywhere. Every insert is
@@ -36,9 +37,7 @@ exactly what the portal should treat as "choose a plan" — left alone on
 purpose, as the one deliberately empty state worth keeping in the demo.
 """
 
-import uuid
 from datetime import UTC, date, datetime, time, timedelta
-from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +45,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
-from app.services.exercise_import import sync_catalog
 from app.models.billing import Subscription
 from app.models.catalog import Exercise, Program, Testimonial
 from app.models.engagement import ConsultationBooking, Lead, Message, MessageThread
@@ -60,8 +58,8 @@ from app.models.enums import (
     Intensity,
     LeadStatus,
     PhotoPose,
-    Sex,
     SessionStatus,
+    Sex,
     SubscriptionStatus,
     TrainingLevel,
     UnitSystem,
@@ -69,9 +67,10 @@ from app.models.enums import (
 )
 from app.models.nutrition import Meal, MealItem, MealPlan
 from app.models.tracking import BodyMeasurement, CardioLog, ProgressPhoto, SleepLog, WeightLog
-from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan, WorkoutSession, SetLog
+from app.models.training import SetLog, WorkoutDay, WorkoutDayExercise, WorkoutPlan, WorkoutSession
 from app.models.user import ClientProfile, User
 from app.services import entitlements
+from app.services.exercise_import import sync_catalog
 
 log = get_logger("seed")
 
@@ -722,13 +721,13 @@ async def _seed_checkin_photo(db: AsyncSession, client: User) -> None:
     it exists to prove the gallery, upload path and signed-URL serving all
     work, not to stand in for a real client image.
     """
+    from io import BytesIO
+
     from PIL import Image, ImageDraw
 
+    from app.services import storage
+
     log_date = date.today() - timedelta(days=3)
-    directory = Path(settings.UPLOAD_DIR) / str(client.id) / log_date.isoformat()
-    directory.mkdir(parents=True, exist_ok=True)
-    filename = f"{uuid.uuid4().hex[:16]}.jpg"
-    destination = directory / filename
 
     image = Image.new("RGB", (800, 1000), color=(20, 20, 23))
     draw = ImageDraw.Draw(image)
@@ -736,17 +735,22 @@ async def _seed_checkin_photo(db: AsyncSession, client: User) -> None:
     draw.text((80, 450), "Check-in photo", fill=(255, 255, 255))
     draw.text((80, 480), "(seed placeholder)", fill=(160, 160, 170))
     draw.text((80, 510), log_date.isoformat(), fill=(160, 160, 170))
-    image.save(destination, "JPEG", quality=85)
+    buffer = BytesIO()
+    image.save(buffer, "JPEG", quality=85)
 
-    key = f"{client.id}/{log_date.isoformat()}/{filename}"
+    # Through the real storage path, so the placeholder lands wherever real
+    # uploads do (Cloudinary in production) and survives a redeploy too.
+    key, content_type, size = await storage.save_progress_photo_bytes(
+        client.id, buffer.getvalue(), log_date
+    )
     db.add(
         ProgressPhoto(
             client_id=client.id,
             log_date=log_date,
             pose=PhotoPose.FRONT,
             file_key=key,
-            content_type="image/jpeg",
-            size_bytes=destination.stat().st_size,
+            content_type=content_type,
+            size_bytes=size,
             shared_with_coach=True,
         )
     )

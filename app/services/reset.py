@@ -1,6 +1,5 @@
 """
 The destructive counterpart to `app.services.seed`.
-
 """
 
 import shutil
@@ -11,13 +10,11 @@ from pathlib import Path
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Imported for the side effect of registering every table on `Base.metadata`.
-# Without it a full reset silently truncates only the handful of tables whose
-# modules happen to have been imported already.
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base
 from app.core.logging import get_logger
+from app.models.catalog import Testimonial
 from app.models.engagement import (
     ConsultationBooking,
     Lead,
@@ -25,16 +22,13 @@ from app.models.engagement import (
     MessageAttachment,
     MessageThread,
 )
-from app.models.catalog import Testimonial
 from app.models.tracking import ProgressPhoto
 from app.models.user import User
+from app.services import storage
 from app.services.seed import BOOKINGS, CLIENTS, LEADS, TESTIMONIALS
 
 log = get_logger("reset")
 
-# Never truncated. Alembic's bookmark is metadata about the schema, not
-# application data — clearing it would leave `upgrade head` believing it had
-# never run and re-applying migrations against tables that already exist.
 PRESERVED_TABLES = frozenset({"alembic_version"})
 
 
@@ -82,12 +76,20 @@ def _safe_path(key: str) -> Path | None:
 
 
 def _delete_keys(keys: Iterable[str]) -> tuple[int, int]:
-    """Unlink each key. Returns (files deleted, bytes freed)."""
+    """Delete each key, local or Cloudinary. Returns (files deleted, bytes freed).
+
+    Bytes are only counted for local files — the CDN does not report a size on
+    delete, and guessing would make the number meaningless.
+    """
     deleted = 0
     freed = 0
     touched_dirs: set[Path] = set()
 
     for key in keys:
+        if storage.is_remote(key):
+            if storage.delete_now(key):
+                deleted += 1
+            continue
         path = _safe_path(key)
         if path is None or not path.is_file():
             continue
@@ -311,6 +313,7 @@ async def reset_all(db: AsyncSession, *, drop_media: bool = True) -> ResetReport
 
     if drop_media:
         report.files_deleted, report.bytes_freed = _purge_upload_root()
+        report.files_deleted += storage.purge_remote_folder()
 
     log.info("reset.all_complete", tables=report.tables_cleared, files=report.files_deleted)
     return report
