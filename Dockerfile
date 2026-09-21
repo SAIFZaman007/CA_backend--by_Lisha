@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY pyproject.toml ./
-# Install into a venv we can copy wholesale into the runtime image.
+
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip && pip install .
@@ -34,11 +34,11 @@ COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser alembic ./alembic
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser entrypoint.sh ./
+
 RUN chmod +x entrypoint.sh && mkdir -p /app/uploads && chown appuser:appuser /app/uploads
 
 USER appuser
 EXPOSE 8000
-VOLUME ["/app/uploads"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1

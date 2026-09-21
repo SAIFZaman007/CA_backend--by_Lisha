@@ -29,6 +29,9 @@ dependencies = [
     # matters for keeping the Docker image simple.
     "reportlab==4.4.10",
     "stripe>=15.6.1",
+    # Durable media storage + CDN. Uploads used to live on the container disk
+    # and were lost on every redeploy — see app/services/storage.py.
+    "cloudinary>=1.44,<2",
 ]
 
 [project.optional-dependencies]

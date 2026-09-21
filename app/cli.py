@@ -10,27 +10,11 @@ Operational CLI for Coach Auto.
     python -m app.cli deactivate-user           # switch an account off by email
     python -m app.cli sync-exercises            # refresh the shipped exercise catalogue
     python -m app.cli verify-links              # HEAD-check every demonstration URL
+    python -m app.cli media                     # report rows whose media file is gone
+    python -m app.cli media --migrate --prune   # move local files to Cloudinary, fix the rest
+    python -m app.cli meal-plans                # auto meal plan for subscribed clients without one
     python -m app.cli healthcheck               # verify the database connection
 
---- On prompts ----------------------------------------------------------------
-
-`seed`, `sync-exercises` and `reset` (in its default demo scope) run
-immediately, with no prompt and no environment check. That is deliberate and
-it is not laziness: every one of them is either idempotent or scoped to rows
-this repository wrote itself, so a human typing a word first was friction
-without protection. It also makes them usable from a deploy hook, which a
-prompt does not.
-
-`reset --scope all` is the exception, and it is a real one rather than a
-reflex. That command empties tables holding real clients, real messages, real
-check-in photos and real payment history. It is not idempotent, not scoped,
-and not undoable from here. So it requires `--yes` — a flag rather than an
-interactive prompt, so it stays scriptable when you genuinely mean it and
-cannot happen by tab-completing your way into the wrong command.
-
-Credentials come from settings — i.e. from the environment — everywhere except
-`create-coach`, which is the one deliberate place to set a password by hand and
-takes `--email` / `--password` for automation or prompts for them when omitted.
 """
 
 import argparse
@@ -296,6 +280,7 @@ async def cmd_sync_exercises(args: argparse.Namespace) -> int:
     print(
         f"Catalogue synced ({catalog_size()} movements shipped): "
         f"{report.created} created, {report.backfilled} backfilled, "
+        f"{report.repaired_links} demonstration links repaired, "
         f"{report.unchanged} already current."
     )
     return EXIT_OK
@@ -304,9 +289,11 @@ async def cmd_sync_exercises(args: argparse.Namespace) -> int:
 async def cmd_verify_links(args: argparse.Namespace) -> int:
     """HEAD-check every demonstration URL and print the ones that fail.
 
-    The catalogue's links are derived from a slug pattern rather than scraped,
-    so a handful will not resolve. This finds all of them in one pass instead
-    of one client complaint at a time.
+    Every catalogue link is verified at build time, but a source site can move
+    a page at any point, and a coach's own pasted links are never checked on
+    save. This finds dead links in one pass instead of one client complaint at
+    a time. Bot-protected hosts (HTTP 403/429) are reported as unverifiable,
+    not broken.
     """
     from app.services.exercise_import import verify_video_links
 
@@ -320,9 +307,71 @@ async def cmd_verify_links(args: argparse.Namespace) -> int:
         print(f"  {row.name}: {reason}\n    {row.url}")
     if broken:
         print(
-            "\nRepoint these from Exercise Library in the dashboard, or edit "
-            "the name in app/data/exercise_library.py so the slug matches."
+            "\nRepoint these from Exercise Library in the dashboard, or fix the "
+            "URL in app/data/exercise_library.py and run `sync-exercises`."
         )
+    return EXIT_OK
+
+
+async def cmd_media(args: argparse.Namespace) -> int:
+    """Audit every media column; optionally migrate to Cloudinary and prune.
+
+    Run once after switching production to Cloudinary: `--migrate` moves any
+    file that is still on this container's disk, `--prune` clears the rows
+    whose file an earlier redeploy already destroyed, so nothing on screen is
+    a broken image any more.
+    """
+    from app.services import storage
+    from app.services.media_audit import audit_media
+
+    print(f"Storage backend: {storage.describe()}")
+    async with SessionLocal() as db:
+        try:
+            report = await audit_media(db, migrate=args.migrate, prune=args.prune)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FAILED
+        await db.commit()
+
+    _rule("Media audit")
+    for column in report.columns:
+        print(
+            f"  {column.label:<34} remote {column.remote:>4} · local {column.local:>4} · "
+            f"missing {column.missing:>4} · migrated {column.migrated:>4} · "
+            f"pruned {column.pruned:>4}"
+        )
+    if report.missing and not args.prune:
+        print("\nRows point at files that no longer exist. Re-run with --prune to clear them.")
+    if report.local and not args.migrate and storage.is_cloud_enabled():
+        print("Files still on local disk will vanish on the next deploy. Re-run with --migrate.")
+    return EXIT_OK
+
+
+async def cmd_meal_plans(args: argparse.Namespace) -> int:
+    """Give every subscribed client without an active meal plan an automatic one."""
+    from app.models.billing import Subscription
+    from app.models.enums import ENTITLING_STATUSES
+    from app.services.meal_planner import ensure_auto_meal_plan
+
+    created = 0
+    async with SessionLocal() as db:
+        client_ids = (
+            (
+                await db.execute(
+                    select(Subscription.client_id)
+                    .where(Subscription.status.in_(ENTITLING_STATUSES))
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for client_id in client_ids:
+            if await ensure_auto_meal_plan(db, client_id) is not None:
+                created += 1
+        await db.commit()
+
+    print(f"{len(client_ids)} subscribed clients checked, {created} automatic meal plans created.")
     return EXIT_OK
 
 
@@ -388,7 +437,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required for --scope all. Confirms you mean to delete real data.",
     )
 
-    coach = add("create-coach", cmd_create_coach, "Create the coach account, or reset its password.")
+    coach = add(
+        "create-coach", cmd_create_coach, "Create the coach account, or reset its password."
+    )
     coach.add_argument("--email", help="Defaults to COACH_EMAIL, or prompts.")
     coach.add_argument(
         "--password",
@@ -404,6 +455,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("sync-exercises", cmd_sync_exercises, "Import or refresh the shipped exercise catalogue.")
     add("verify-links", cmd_verify_links, "HEAD-check every demonstration URL.")
+    media = add("media", cmd_media, "Audit uploaded media; migrate to Cloudinary; prune dead rows.")
+    media.add_argument("--migrate", action="store_true", help="Upload local files to Cloudinary.")
+    media.add_argument(
+        "--prune", action="store_true", help="Clear rows whose file no longer exists."
+    )
+    add("meal-plans", cmd_meal_plans, "Create automatic meal plans for subscribed clients.")
     add("healthcheck", cmd_healthcheck, "Verify the database connection.")
 
     return parser

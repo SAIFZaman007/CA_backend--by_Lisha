@@ -52,7 +52,6 @@ class Settings(BaseSettings):
 
     PUBLIC_API_URL: str = ""
     SUPPORT_EMAIL: str = "coachauto2026@gmail.com"
-    INSTAGRAM_URL: str = "https://www.instagram.com/coach.auto"
 
     # --- Mail (optional; logs to stdout when unset) -------------------------
     SMTP_HOST: str | None = None
@@ -66,9 +65,39 @@ class Settings(BaseSettings):
     EMAIL_REPLY_TO: str = ""
     EMAIL_LOGO_URL: str = ""
 
-    # --- Uploads ------------------------------------------------------------
-    
-    
+    # --- Media storage ------------------------------------------------------
+    STORAGE_BACKEND: Literal["auto", "local", "cloudinary"] = "auto"
+    CLOUDINARY_URL: str = ""
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    CLOUDINARY_FOLDER: str = "coach-auto"
+    CLOUDINARY_AUTH_TOKEN_KEY: str = ""
+    CLOUDINARY_UPLOAD_TIMEOUT: int = 600
+
+    @property
+    def cloudinary_configured(self) -> bool:
+        return bool(
+            self.CLOUDINARY_URL
+            or (self.CLOUDINARY_CLOUD_NAME and self.CLOUDINARY_API_KEY and self.CLOUDINARY_API_SECRET)
+        )
+
+    @property
+    def use_cloudinary(self) -> bool:
+        if self.STORAGE_BACKEND == "local":
+            return False
+        if self.STORAGE_BACKEND == "cloudinary":
+            if not self.cloudinary_configured:
+                raise RuntimeError(
+                    "STORAGE_BACKEND=cloudinary but no Cloudinary credentials are set. "
+                    "Provide CLOUDINARY_URL (or CLOUD_NAME / API_KEY / API_SECRET)."
+                )
+            return True
+        return self.cloudinary_configured
+
+    # --- Nutrition automation ----------------------------------------------
+    AUTO_MEAL_PLAN_ENABLED: bool = True
+
     # --- Stripe -------------------------------------------------------------
 
     STRIPE_SECRET_KEY: str = ""
@@ -105,14 +134,15 @@ class Settings(BaseSettings):
         return v
 
     # --- SEO ----------------------------------------------------------------
-    CANONICAL_SITE_URL: str = "https://autonomyfitness.press"
-    SEO_DEFAULT_IMAGE: str = "/images/hero-portrait.png"
+    CANONICAL_SITE_URL: str = "https://coach-auto.maktechgroups.com"
+    SEO_DEFAULT_IMAGE: str = "/images/og-cover.jpg"
     SEO_LOCALE: str = "en_US"
     BUSINESS_REGION: str = "US"
 
     @property
     def canonical_origin(self) -> str:
-        """CANONICAL_SITE_URL with any trailing slash removed.
+        """
+        CANONICAL_SITE_URL with any trailing slash removed.
 
         Every caller concatenates a path onto this. One stray slash in the env
         file otherwise produces `https://site.com//programs` throughout the
@@ -134,7 +164,8 @@ class Settings(BaseSettings):
 
     @property
     def public_api_origin(self) -> str:
-        """PUBLIC_API_URL with any trailing slash removed, or "" when unset.
+        """
+        PUBLIC_API_URL with any trailing slash removed, or "" when unset.
 
         Callers concatenate a path onto this, so a stray slash in the env file
         would otherwise produce `https://api.example.com//api/v1/...`.
@@ -159,7 +190,8 @@ class Settings(BaseSettings):
 
     @property
     def trusted_hosts(self) -> list[str]:
-        """Hostnames this API will answer to in production.
+        """
+        Hostnames this API will answer to in production.
 
         Derived from the origins already configured rather than hard-coded, so
         a new deployment domain is one environment variable and not a code
@@ -182,7 +214,8 @@ class Settings(BaseSettings):
 
     @property
     def db_host(self) -> str:
-        """The bare hostname of DATABASE_URL — safe to print in a log line or
+        """
+        The bare hostname of DATABASE_URL — safe to print in a log line or
         a CLI confirmation prompt, unlike the DSN itself, which carries the
         password in plaintext.
 

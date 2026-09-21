@@ -36,6 +36,17 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("SELECT 1"))
     log.info("startup", environment=settings.ENVIRONMENT)
 
+    from app.services import storage
+
+    media = storage.describe()
+    log.info("storage.backend", **media)
+    if settings.is_production and media["backend"] == "local":
+        log.warning(
+            "storage.ephemeral_in_production",
+            detail="Uploads are on the container disk and will not survive a "
+            "redeploy. Set CLOUDINARY_URL (or STORAGE_BACKEND=cloudinary).",
+        )
+
     if settings.SEED_ON_STARTUP:
         from app.services.seed import run_seed
 
@@ -68,31 +79,8 @@ app.state.limiter = limiter
 
 # --- Request context ----------------------------------------------------------
 
-
 def _public_origin(request: Request) -> str:
-    """
-    The origin the browser used to reach this API on this request.
 
-    Two front ends on two hostnames share this API, so the address a media file
-    should be advertised at depends on who is asking. See `app.core.media` for
-    why that is derived rather than configured.
-
-    Two things are deliberately careful here.
-
-    The host is checked against `trusted_hosts` before it is used. A `Host`
-    header is attacker-controlled, and an unchecked one would let a caller mint
-    signed image URLs pointing at a hostname they chose. An unrecognised host
-    yields "", which falls back to root-relative paths — the old behaviour, and
-    safe.
-
-    The scheme is not read from `X-Forwarded-Proto` alone. Both SPA nginx
-    configs set that header from their own `$scheme`, which is `http` on the
-    internal hop even when the browser is on `https`. Trusting it as-is would
-    hand an https page an http image URL, which the browser then blocks as
-    mixed content — the same silent-broken-image failure by a different route.
-    In production this API is only ever reached over https, so https is the
-    answer unless a forwarded header positively says otherwise.
-    """
     forwarded_host = request.headers.get("x-forwarded-host", "")
     host = (forwarded_host.split(",")[0] or request.headers.get("host", "")).strip()
     if not host:
@@ -114,15 +102,7 @@ def _public_origin(request: Request) -> str:
 
 
 async def request_context(request: Request, call_next):
-    """
-    Tag every request with an ID, time it, and set security headers.
 
-    The `X-Request-ID` is echoed on the failure response as well as the success
-    one. When the coach reports "it says it cannot reach the server", that id
-    is the single string that ties their screenshot to a stack trace in the
-    container log — without it, diagnosing an intermittent 500 in production
-    means guessing at timestamps.
-    """
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
     started = time.perf_counter()
@@ -171,8 +151,13 @@ async def request_context(request: Request, call_next):
             response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
 
         # Private media must never end up in a search index or a shared cache.
-        if request.url.path.endswith(("/file", "/stream", "/poster")):
+        path = request.url.path
+        if path.endswith(("/file", "/stream", "/poster", "/image")):
             response.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
+        elif path.startswith(settings.API_V1_PREFIX) and not path.endswith(
+            ("/sitemap.xml", "/robots.txt")
+        ):
+            response.headers.setdefault("X-Robots-Tag", "noindex")
 
         response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
 
@@ -216,7 +201,6 @@ app.add_middleware(
 
 # --- Error handling -----------------------------------------------------------
 
-
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
@@ -239,10 +223,8 @@ async def validation_handler(request: Request, exc: RequestValidationError) -> J
         content={"detail": "Check the highlighted fields and try again.", "fields": fields},
     )
 
-
 # --- Routes -------------------------------------------------------------------
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
 
 @app.get("/health", tags=["ops"], include_in_schema=False)
 async def health() -> dict[str, str]:
