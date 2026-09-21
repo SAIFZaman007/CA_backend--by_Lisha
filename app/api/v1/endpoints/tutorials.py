@@ -7,8 +7,7 @@ Clients see published recordings only. Everything here is filtered by
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
 
 from app.core.config import settings
@@ -227,7 +226,7 @@ async def stream_tutorial(
     db: DbSession,
     user: OptionalUser = None,
     token: str | None = Query(None),
-) -> FileResponse:
+) -> Response:
     """
     Serve an uploaded tutorial file.
 
@@ -244,14 +243,12 @@ async def stream_tutorial(
     if tutorial is None or not tutorial.is_published or not tutorial.file_key:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That tutorial was not found.")
 
-    path = storage.resolve_path(
-        tutorial.file_key, not_found_message="That video could not be found."
-    )
-
-    return FileResponse(
-        path,
-        media_type=VIDEO_MEDIA_TYPES.get(path.suffix.lower(), "video/mp4"),
-        headers={"Cache-Control": "private, max-age=900"},
+    suffix = ("." + tutorial.file_key.rsplit(".", 1)[-1].lower()) if "." in tutorial.file_key else ""
+    return storage.serve(
+        tutorial.file_key,
+        not_found_message="That video could not be found.",
+        media_type=VIDEO_MEDIA_TYPES.get(suffix, "video/mp4"),
+        cache_control="private, max-age=900",
     )
 
 
@@ -261,7 +258,7 @@ async def tutorial_poster(
     db: DbSession,
     user: OptionalUser = None,
     token: str | None = Query(None),
-) -> FileResponse:
+) -> Response:
     """
     Serve the poster frame for an uploaded tutorial.
 
@@ -281,10 +278,9 @@ async def tutorial_poster(
     if tutorial is None or not tutorial.is_published or not tutorial.thumbnail_key:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
 
-    return FileResponse(
-        storage.resolve_path(
-            tutorial.thumbnail_key, not_found_message="That image was not found."
-        ),
+    return storage.serve(
+        tutorial.thumbnail_key,
+        not_found_message="That image was not found.",
         media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=86400"},
+        cache_control="private, max-age=86400",
     )

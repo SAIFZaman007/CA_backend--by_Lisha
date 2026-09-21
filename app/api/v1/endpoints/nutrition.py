@@ -8,10 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession
+from app.core.logging import get_logger
+from app.models.enums import UserRole
 from app.models.nutrition import Meal, MealLog, MealPlan
 from app.schemas.tracking import MealLogIn, MealLogOut, MealOut, MealPlanOut
+from app.services import entitlements
+from app.services.meal_planner import SOURCE_AUTO, MealPlanInputError, generate_meal_plan
 
 router = APIRouter(prefix="/nutrition", tags=["nutrition"])
+log = get_logger("nutrition")
 
 
 async def _active_plan(db: DbSession, client_id: uuid.UUID) -> MealPlan | None:
@@ -28,6 +33,39 @@ async def _active_plan(db: DbSession, client_id: uuid.UUID) -> MealPlan | None:
 async def active_meal_plan(user: CurrentUser, db: DbSession) -> MealPlan | None:
     """The full week. Null until a coach assigns a plan."""
     return await _active_plan(db, user.id)
+
+
+@router.post("/plan/generate", response_model=MealPlanOut, status_code=status.HTTP_201_CREATED)
+async def generate_my_meal_plan(user: CurrentUser, db: DbSession) -> MealPlan:
+    """Build (or refresh) the client's automatic plan from their latest numbers.
+
+    Allowed when the client has no active plan, or when the active plan is an
+    automatic one — e.g. after logging a new weight. A plan the coach wrote or
+    edited is never replaced from here; that stays the coach's call.
+    """
+    if user.role is not UserRole.CLIENT:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Only clients have meal plans.")
+
+    entitlement = await entitlements.entitlement_for(db, user)
+    if not entitlement.has("meal_plan"):
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Choose a coaching plan to unlock your meal plan.",
+        )
+
+    current = await _active_plan(db, user.id)
+    if current is not None and current.source != SOURCE_AUTO:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Your coach has written your current plan. Message them to change it.",
+        )
+
+    try:
+        plan = await generate_meal_plan(db, user.id)
+    except MealPlanInputError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    log.info("nutrition.self_generated", user_id=str(user.id), plan_id=str(plan.id))
+    return plan
 
 
 @router.get("/plan/day/{day_of_week}", response_model=list[MealOut])

@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.core.deps import CurrentUser, DbSession
+from app.models.enums import UserRole
 from app.models.user import ClientProfile, User
 from app.schemas.user import ClientProfileOut, ClientProfileUpdate, UserOut, UserUpdate
 
@@ -62,4 +63,13 @@ async def update_profile(
 
     db.add(profile)
     await db.flush()
+
+
+    if user.role is UserRole.CLIENT and {"height_cm", "current_weight_kg"} & updates.keys():
+        from app.services import entitlements  
+        from app.services.meal_planner import ensure_auto_meal_plan 
+
+        if (await entitlements.entitlement_for(db, user)).has("meal_plan"):
+            await ensure_auto_meal_plan(db, user.id)
+
     return profile

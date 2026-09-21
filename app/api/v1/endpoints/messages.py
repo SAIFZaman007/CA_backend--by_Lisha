@@ -9,7 +9,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -402,13 +401,14 @@ async def attachment_file(
         # tells an enumerating caller which ids are real.
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Image not found.")
 
-    return FileResponse(
-        storage.resolve_path(attachment.file_key, not_found_message="Image not found."),
+    # Private, and short. Long enough that scrolling a conversation does not
+    # refetch every photo, short enough that a shared browser does not hold
+    # someone's progress shots in cache all afternoon.
+    return storage.serve(
+        attachment.file_key,
+        not_found_message="Image not found.",
         media_type=attachment.content_type,
-        # Private, and short. Long enough that scrolling a conversation does not
-        # refetch every photo, short enough that a shared browser does not hold
-        # someone's progress shots in cache all afternoon.
-        headers={"Cache-Control": "private, max-age=300"},
+        cache_control="private, max-age=300",
     )
 
 

@@ -1,4 +1,5 @@
-"""Exercise library — browsable by every signed-in client, editable by the coach.
+"""
+Exercise library — browsable by every signed-in client, editable by the coach.
 
 Each movement carries a video link so a client never has to guess at form. The
 two browse axes the coach's picker offers, muscle group and equipment, are both
@@ -35,12 +36,9 @@ async def list_exercises(
     muscle_group: MuscleGroup | None = None,
     equipment: Equipment | None = None,
     mechanics: Mechanics | None = None,
-    # `target_muscle` is the old free-text filter. Kept because the client
-    # portal still links to it from a workout card, and breaking a URL a client
-    # may have bookmarked to save one query parameter is a poor trade.
     target_muscle: str | None = Query(None, max_length=80),
     has_video: bool | None = Query(None),
-    limit: int = Query(100, ge=1, le=300),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> list[Exercise]:
     stmt = select(Exercise).where(Exercise.is_active.is_(True))
@@ -63,9 +61,6 @@ async def list_exercises(
     elif has_video is False:
         stmt = stmt.where(Exercise.video_url.is_(None))
 
-    # Most-used first, then alphabetical. An unfiltered picker opening on
-    # "Ab Wheel Rollout" makes the coach scroll past sixty rarities to reach a
-    # squat; opening on what they actually prescribe does not.
     stmt = (
         stmt.order_by(Exercise.popularity.desc(), Exercise.name).limit(limit).offset(offset)
     )
@@ -74,7 +69,8 @@ async def list_exercises(
 
 @router.get("/filters", response_model=ExerciseFacets)
 async def exercise_filters(user: CurrentUser, db: DbSession) -> ExerciseFacets:
-    """Both browse axes, with counts, in one request.
+    """
+    Both browse axes, with counts, in one request.
 
     The counts are the point. A coach opening "Palmar Fascia" expecting a
     library and finding four movements has been misled by the heading; showing
@@ -128,9 +124,6 @@ async def exercise_filters(user: CurrentUser, db: DbSession) -> ExerciseFacets:
         ),
         target_muscles=list(muscles),
         total=sum(group_counts.values()),
-        # Surfaced so the dashboard can warn before a plan save fails: any
-        # movement counted here will be refused by
-        # `assert_every_movement_has_video`.
         without_video=without_video,
     )
 

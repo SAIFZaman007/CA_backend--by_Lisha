@@ -13,7 +13,7 @@ from datetime import datetime
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -40,13 +40,13 @@ async def site_meta() -> dict[str, str]:
         "brand": settings.BRAND_NAME,
         "business_name": settings.BUSINESS_NAME,
         "email": settings.SUPPORT_EMAIL,
-        "instagram": settings.INSTAGRAM_URL,
         "site_url": settings.FRONTEND_URL,
     }
 
 
 def _public_image_url(program: Program) -> str | None:
-    """Whichever artwork the coach supplied: an upload wins over a pasted link.
+    """
+    Whichever artwork the coach supplied: an upload wins over a pasted link.
 
     Mirrors `_image_url` in `app.api.v1.endpoints.admin.catalog` — kept as a
     separate function rather than a shared import because the two live in
@@ -55,7 +55,10 @@ def _public_image_url(program: Program) -> str | None:
     shows artwork the other 404s on.
     """
     if program.image_key:
-        return media_url(api_path("programs", str(program.id), "image"))
+
+        return storage.public_url(program.image_key, width=1200) or media_url(
+            api_path("programs", str(program.id), "image")
+        )
     return program.image_external_url
 
 
@@ -104,7 +107,6 @@ async def create_lead(
 ) -> dict[str, str]:
     """The "Start your transformation" form."""
     if payload.website:
-        # Honeypot tripped. Answer normally so the bot learns nothing.
         log.info("lead.honeypot_blocked")
         return {"message": "Thanks — your details are with Coach Auto."}
 
@@ -151,8 +153,9 @@ async def create_booking(
 
 
 @router.get("/programs/{program_id}/image")
-async def program_image(program_id: uuid.UUID, db: DbSession) -> FileResponse:
-    """A tier's hero image.
+async def program_image(program_id: uuid.UUID, db: DbSession) -> Response:
+    """
+    A tier's hero image.
 
     Public and unauthenticated on purpose — this is marketing artwork on the
     pricing page, not client data — so it is cached hard at the edge.
@@ -161,23 +164,16 @@ async def program_image(program_id: uuid.UUID, db: DbSession) -> FileResponse:
     if program is None or not program.image_key:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No image for that plan.")
 
-    return FileResponse(
-        storage.resolve_path(program.image_key, not_found_message="No image for that plan."),
+    return storage.serve(
+        program.image_key,
+        not_found_message="No image for that plan.",
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
+        cache_control="public, max-age=86400",
     )
 
 
 # --- Search engines -----------------------------------------------------------
-#
-# Generated, not static. Both files have to list database-backed content — the
-# coaching tiers and the gallery — and a file baked into the frontend build
-# goes stale the first time the coach publishes a photo.
 
-# Crawl priority is relative, not absolute: it tells a crawler which of *our*
-# pages matter most, nothing about how we rank against anyone else. The
-# homepage and the programme pages convert; the legal pages exist because they
-# have to.
 _STATIC_ROUTES: list[tuple[str, str, str]] = [
     ("/", "weekly", "1.0"),
     ("/programs", "weekly", "0.9"),
@@ -195,9 +191,6 @@ def _url_entry(
 ) -> str:
     parts = [f"    <loc>{escape(loc)}</loc>"]
     if lastmod is not None:
-        # W3C datetime, which is what the sitemap protocol asks for. A bare
-        # date is legal too, but a timestamp lets a crawler tell a photo
-        # published this morning from one published three weeks ago.
         parts.append(f"    <lastmod>{lastmod.date().isoformat()}</lastmod>")
     parts.append(f"    <changefreq>{changefreq}</changefreq>")
     parts.append(f"    <priority>{priority}</priority>")
@@ -205,9 +198,22 @@ def _url_entry(
     return f"  <url>\n{body}\n  </url>"
 
 
+def _gallery_image_loc(origin: str, image: GalleryImage) -> str:
+    """
+    Where a crawler should fetch a gallery photo from.
+
+    The CDN address when the photo is on Cloudinary. The API path otherwise —
+    which is why robots.txt must not disallow `/api/`.
+    """
+    return storage.public_url(image.image_key, width=1600) or (
+        f"{origin}{settings.API_V1_PREFIX}/gallery/{image.id}/file"
+    )
+
+
 @router.get("/meta/sitemap.xml", include_in_schema=False)
 async def sitemap(db: DbSession) -> Response:
-    """The sitemap, built from what is actually published right now.
+    """
+    The sitemap, built from what is actually published right now.
 
     Served through nginx at `/sitemap.xml` — see the frontend's nginx.conf. It
     lives under the API because only the API knows which tiers are live and
@@ -242,10 +248,6 @@ async def sitemap(db: DbSession) -> Response:
         for program in programs
     )
 
-    # Image sitemap extension. Gallery photos are the one part of this site
-    # with real Google Images potential, and the `<image:>` namespace is how
-    # they get indexed with their captions attached rather than as anonymous
-    # files behind an API path.
     images = (
         (
             await db.execute(
@@ -261,8 +263,7 @@ async def sitemap(db: DbSession) -> Response:
     if images:
         image_nodes = "\n".join(
             "    <image:image>\n"
-            f"      <image:loc>{escape(origin)}{settings.API_V1_PREFIX}"
-            f"/gallery/{image.id}/file</image:loc>\n"
+            f"      <image:loc>{escape(_gallery_image_loc(origin, image))}</image:loc>\n"
             f"      <image:title>{escape(image.title)}</image:title>\n"
             f"      <image:caption>{escape(image.alt_text)}</image:caption>\n"
             "    </image:image>"
@@ -290,7 +291,8 @@ async def sitemap(db: DbSession) -> Response:
 
 @router.get("/meta/robots.txt", include_in_schema=False)
 async def robots() -> PlainTextResponse:
-    """robots.txt, with the sitemap pointed at the canonical origin.
+    """
+    robots.txt, with the sitemap pointed at the canonical origin.
 
     The portal is disallowed in full. Everything behind `/portal` is personal
     health data — weights, measurements, photos — and while it all sits behind
@@ -314,7 +316,12 @@ Disallow: /login
 Disallow: /register
 Disallow: /forgot-password
 Disallow: /reset-password
-Disallow: /api/
+Disallow: /checkout/
+
+# `/api/` is deliberately NOT disallowed. Googlebot renders this single-page
+# app and must be able to fetch the JSON the public pages are built from
+# (programmes, gallery, testimonials); blocking it indexes empty shells.
+# API responses carry `X-Robots-Tag: noindex` so they are never listed.
 
 # Answer engines are welcome on the public pages.
 User-agent: GPTBot

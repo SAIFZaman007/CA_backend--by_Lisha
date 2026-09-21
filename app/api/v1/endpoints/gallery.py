@@ -11,8 +11,7 @@ the two must never be confused. Nothing in this module touches client data.
 import uuid
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 
 from app.core.deps import DbSession
@@ -41,7 +40,9 @@ def image_url(image: GalleryImage) -> str:
     answer on the same origin, and assuming that quietly is what broke every
     private image in production.
     """
-    return media_url(api_path("gallery", str(image.id), "file"))
+    return storage.public_url(image.image_key, width=1600) or media_url(
+        api_path("gallery", str(image.id), "file")
+    )
 
 
 def serialise(image: GalleryImage) -> GalleryImageOut:
@@ -127,9 +128,6 @@ async def list_sections(
         if len(grouped[image.category]) < per_category:
             grouped[image.category].append(image)
 
-    # Iterating the label map rather than the grouped dict keeps the section
-    # order stable and editorial, instead of whatever the enum comparison or
-    # insertion order happens to produce.
     return [
         GallerySection(
             category=category,
@@ -160,7 +158,7 @@ async def list_categories(
 @router.get("/{image_id}/file")
 async def gallery_file(
     image_id: uuid.UUID, db: DbSession
-) -> FileResponse:
+) -> Response:
     """
     The bytes. Public, immutable, cached hard.
 
@@ -173,10 +171,11 @@ async def gallery_file(
     if image is None or not image.is_published:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That image was not found.")
 
-    return FileResponse(
-        storage.resolve_path(image.image_key, not_found_message="That image was not found."),
+    return storage.serve(
+        image.image_key,
+        not_found_message="That image was not found.",
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        cache_control="public, max-age=31536000, immutable",
     )
 
 

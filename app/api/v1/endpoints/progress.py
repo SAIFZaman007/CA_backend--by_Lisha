@@ -4,7 +4,6 @@ import uuid
 from datetime import date, timedelta
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -223,10 +222,12 @@ async def get_photo_file(
     if photo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found.")
 
-    return FileResponse(
-        storage.resolve_path(photo.file_key, not_found_message="Photo not found."),
+    return storage.serve(
+        photo.file_key,
+        not_found_message="Photo not found.",
         media_type=photo.content_type,
-        headers={"Cache-Control": "private, max-age=3600", "X-Robots-Tag": "noindex, noimageindex"},
+        cache_control="private, max-age=3600",
+        extra_headers={"X-Robots-Tag": "noindex, noimageindex"},
     )
 
 
