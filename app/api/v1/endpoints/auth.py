@@ -204,7 +204,14 @@ async def login(
     return await _issue_session(db, user, request, response)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    responses={
+        204: {"description": "No session cookie: an anonymous visitor, nothing to resume."},
+        401: {"description": "A session cookie was sent but is invalid, expired or revoked."},
+    },
+)
 async def refresh(
     request: Request,
     response: Response,
@@ -217,10 +224,15 @@ async def refresh(
         "REFRESH_COOKIE_NAMES. Carries no privilege on its own: the session is still "
         "resolved from the signed, server-stored token underneath it.",
     ),
-) -> TokenResponse:
+) -> TokenResponse | Response:
     token = request.cookies.get(REFRESH_COOKIE_NAMES[audience])
     if not token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="No active session.")
+        # Every page load of both SPAs asks "is there a session to resume?".
+        # For a visitor who never signed in the honest answer is "no", not an
+        # error: a 401 here put a red console error on every public page (and
+        # cost the Lighthouse Best Practices score). 204 = nothing to resume.
+        # An invalid or expired cookie below still gets a real 401.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # The audience is checked twice: once by which cookie we even looked at,
     # and again against the claim baked into the token itself. Belt and

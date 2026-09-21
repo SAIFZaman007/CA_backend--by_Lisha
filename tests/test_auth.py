@@ -33,3 +33,19 @@ async def test_client_cannot_reach_coach_only_routes(client, auth_headers):
         json={"name": "Hack Squat", "target_muscle": "Quads"},
     )
     assert response.status_code == 403
+
+
+async def test_refresh_without_a_session_cookie_is_204_not_an_error(client):
+    # Anonymous visitors: both SPAs probe for a session on every page load.
+    response = await client.post("/api/v1/auth/refresh?audience=client")
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+async def test_refresh_with_a_bad_cookie_is_still_401(client):
+    client.cookies.set("coachauto_refresh_client", "not-a-real-token")
+    try:
+        response = await client.post("/api/v1/auth/refresh?audience=client")
+    finally:
+        client.cookies.clear()
+    assert response.status_code == 401
