@@ -4,6 +4,7 @@ Coach Auto API — application entrypoint.
 Autonomy Health and Fitness · online strength coaching platform.
 """
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -40,6 +41,15 @@ async def lifespan(app: FastAPI):
 
     media = storage.describe()
     log.info("storage.backend", **media)
+    if media["backend"] == "cloudinary":
+        async def _check_media_credentials() -> None:
+            ok, message = await asyncio.to_thread(storage.verify)
+            if ok:
+                log.info("storage.cloudinary_ready", detail=message)
+            else:
+                log.error("storage.cloudinary_rejected", detail=message)
+
+        app.state.media_check = asyncio.create_task(_check_media_credentials())
     if settings.is_production and media["backend"] == "local":
         log.warning(
             "storage.ephemeral_in_production",
@@ -148,7 +158,9 @@ async def request_context(request: Request, call_next):
                 "frame-ancestors 'none';"
             )
         else:
-            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; frame-ancestors 'none'"
+            )
 
         # Private media must never end up in a search index or a shared cache.
         path = request.url.path

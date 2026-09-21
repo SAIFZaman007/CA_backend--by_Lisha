@@ -75,12 +75,66 @@ class Settings(BaseSettings):
     CLOUDINARY_AUTH_TOKEN_KEY: str = ""
     CLOUDINARY_UPLOAD_TIMEOUT: int = 600
 
+    @field_validator(
+        "CLOUDINARY_URL",
+        "CLOUDINARY_CLOUD_NAME",
+        "CLOUDINARY_API_KEY",
+        "CLOUDINARY_API_SECRET",
+        "CLOUDINARY_FOLDER",
+        "CLOUDINARY_AUTH_TOKEN_KEY",
+        mode="before",
+    )
+    @classmethod
+    def _tidy_cloudinary(cls, value: object) -> object:
+        # Values pasted from the console often carry stray spaces or quotes.
+        return value.strip().strip("\"'").strip() if isinstance(value, str) else value
+
+    @property
+    def cloudinary_credentials(self) -> tuple[str, str, str] | None:
+        """(cloud_name, api_key, api_secret), or None when not configured.
+
+        Parsed here rather than handed to the SDK as `cloudinary_url=`: the
+        SDK only parses a CLOUDINARY_URL it reads from the *process
+        environment* at import time. Values from `.env` (which pydantic reads,
+        but does not export) were stored as an inert attribute, so every upload
+        failed with "Must supply api_key". The three separate variables win
+        when all three are set; otherwise the URL is used.
+        """
+        if self.CLOUDINARY_CLOUD_NAME and self.CLOUDINARY_API_KEY and self.CLOUDINARY_API_SECRET:
+            return self.CLOUDINARY_CLOUD_NAME, self.CLOUDINARY_API_KEY, self.CLOUDINARY_API_SECRET
+        if not self.CLOUDINARY_URL:
+            return None
+
+        from urllib.parse import unquote, urlparse  # noqa: PLC0415
+
+        parsed = urlparse(self.CLOUDINARY_URL)
+        cloud, key, secret = parsed.hostname, parsed.username, parsed.password
+        if parsed.scheme != "cloudinary" or not (cloud and key and secret):
+            raise RuntimeError(
+                "CLOUDINARY_URL is malformed. Expected "
+                "cloudinary://<api_key>:<api_secret>@<cloud_name> — copy the "
+                "'API environment variable' from the Cloudinary console."
+            )
+        return cloud, unquote(key), unquote(secret)
+
     @property
     def cloudinary_configured(self) -> bool:
-        return bool(
-            self.CLOUDINARY_URL
-            or (self.CLOUDINARY_CLOUD_NAME and self.CLOUDINARY_API_KEY and self.CLOUDINARY_API_SECRET)
-        )
+        parts = (self.CLOUDINARY_CLOUD_NAME, self.CLOUDINARY_API_KEY, self.CLOUDINARY_API_SECRET)
+        return bool(self.CLOUDINARY_URL or all(parts))
+
+    @property
+    def cloudinary_auth_token_key(self) -> str:
+        """The token-based-auth key, only if it is plausibly one.
+
+        This is NOT the API key: it is a separate hex key Cloudinary issues
+        when token-based authentication is enabled on the account (an
+        add-on). Anything that is not even-length hex would make every
+        private-media URL fail to sign, so it is ignored (and logged at boot).
+        """
+        key = self.CLOUDINARY_AUTH_TOKEN_KEY
+        if not key or len(key) % 2 or any(c not in "0123456789abcdefABCDEF" for c in key):
+            return ""
+        return key
 
     @property
     def use_cloudinary(self) -> bool:

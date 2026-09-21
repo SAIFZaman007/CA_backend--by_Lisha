@@ -379,7 +379,12 @@ async def cmd_healthcheck(args: argparse.Namespace) -> int:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     print(f"Database reachable ({settings.db_host}).")
-    return EXIT_OK
+
+    from app.services import storage  # noqa: PLC0415
+
+    ok, message = await asyncio.to_thread(storage.verify)
+    print(f"Media storage: {message}.")
+    return EXIT_OK if ok else EXIT_FAILED
 
 
 # --- Wiring --------------------------------------------------------------------

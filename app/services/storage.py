@@ -51,16 +51,18 @@ def _cloudinary():
     import cloudinary.uploader  # noqa: F401,PLC0415
     import cloudinary.utils  # noqa: F401,PLC0415
 
-    if settings.CLOUDINARY_URL:
-        # The SDK parses cloudinary://<key>:<secret>@<cloud> itself.
-        cloudinary.config(cloudinary_url=settings.CLOUDINARY_URL, secure=True)
-    else:
-        cloudinary.config(
-            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-            api_key=settings.CLOUDINARY_API_KEY,
-            api_secret=settings.CLOUDINARY_API_SECRET,
-            secure=True,
-        )
+    credentials = settings.cloudinary_credentials
+    if credentials is None:  # pragma: no cover — use_cloudinary guarantees it
+        return None
+    cloud_name, api_key, api_secret = credentials
+    # Always explicit. Never `cloudinary_url=`: the SDK does not parse that
+    # keyword, it only parses CLOUDINARY_URL from os.environ at import time.
+    cloudinary.config(
+        cloud_name=cloud_name,
+        api_key=api_key,
+        api_secret=api_secret,
+        secure=True,
+    )
     return cloudinary
 
 
@@ -72,11 +74,48 @@ def describe() -> dict[str, str]:
     """Safe-to-log summary of the active backend (no secrets)."""
     if _cloudinary() is None:
         return {"backend": "local", "upload_dir": settings.UPLOAD_DIR}
-    return {
+    summary = {
         "backend": "cloudinary",
         "cloud": _cloudinary().config().cloud_name or "?",
         "folder": settings.CLOUDINARY_FOLDER,
+        "signed_url_expiry": "on" if settings.cloudinary_auth_token_key else "off",
     }
+    if settings.CLOUDINARY_AUTH_TOKEN_KEY and not settings.cloudinary_auth_token_key:
+        summary["warning"] = (
+            "CLOUDINARY_AUTH_TOKEN_KEY ignored: it is not a token-auth key "
+            "(that is a separate hex key, not the API key). Remove it."
+        )
+    return summary
+
+
+def verify() -> tuple[bool, str]:
+    """Ask Cloudinary whether these credentials work. Returns (ok, message).
+
+    Synchronous (one Admin API call). Used at startup in the background and by
+    `python -m app.cli healthcheck`, so a wrong key shows up in the logs
+    immediately — not as a vague error on the coach's first upload.
+    """
+    sdk = _cloudinary()
+    if sdk is None:
+        return True, f"local disk ({settings.UPLOAD_DIR}) — not durable, development only"
+    try:
+        sdk.api.ping(timeout=10)
+    except Exception as exc:  # noqa: BLE001 — report whatever the SDK raised
+        return False, _explain(exc)
+    return True, f"Cloudinary cloud '{sdk.config().cloud_name}' accepted the credentials"
+
+
+def _explain(exc: Exception) -> str:
+    """A human sentence for a Cloudinary failure, for logs and the CLI."""
+    name = type(exc).__name__
+    text = str(exc)
+    if "api_key" in text or "api_secret" in text or "cloud_name" in text:
+        return f"credentials missing from the SDK configuration ({text})"
+    if name == "AuthorizationRequired" or "Invalid Signature" in text or "Unknown API key" in text:
+        return f"Cloudinary rejected the credentials — check the API key/secret ({text})"
+    if name == "NotFound" and "cloud" in text.lower():
+        return f"unknown cloud name ({text})"
+    return f"{name}: {text}"
 
 
 # =============================================================================
@@ -173,10 +212,36 @@ def _normalise(raw: bytes, *, max_side: int, quality: int) -> tuple[bytes, int, 
 
 
 def _storage_unavailable(exc: Exception) -> HTTPException:
-    log.error("storage.remote_failed", error=f"{type(exc).__name__}: {exc}")
+    """Map a Cloudinary failure to an honest status and message.
+
+    * Misconfiguration (missing/rejected credentials) is the server's fault,
+      not the file's: 503, and the coach is told it is a setup problem.
+    * Cloudinary refusing the file itself (corrupt, unsupported codec, over the
+      plan's size limit): 422 with Cloudinary's reason.
+    * Anything else (network, timeout, rate limit): 502, try again.
+
+    The full reason is always logged. In DEBUG it is also returned, so local
+    development never has to go digging in the terminal.
+    """
+    reason = _explain(exc)
+    name = type(exc).__name__
+    log.error("storage.remote_failed", error=reason)
+    suffix = f" ({reason})" if settings.DEBUG else ""
+
+    if name == "AuthorizationRequired" or "Must supply" in str(exc):
+        return HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Media storage is not configured correctly, so uploads are paused. "
+            f"This is a server setting, not your file.{suffix}",
+        )
+    if name == "BadRequest":
+        return HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"The media service could not process that file: {exc}",
+        )
     return HTTPException(
         status.HTTP_502_BAD_GATEWAY,
-        detail="The media service did not accept that file. Try again in a moment.",
+        detail=f"The media service did not respond properly. Try again in a moment.{suffix}",
     )
 
 
@@ -449,13 +514,13 @@ def _delivery_url(parsed: CloudKey, *, transformation: list[dict] | None = None)
         options["transformation"] = transformation
     if parsed.delivery_type == "authenticated":
         options["sign_url"] = True
-        if settings.CLOUDINARY_AUTH_TOKEN_KEY:
+        if settings.cloudinary_auth_token_key:
             ttl = (
                 settings.MEDIA_VIDEO_URL_TTL_SECONDS
                 if parsed.resource_type == "video"
                 else settings.MEDIA_URL_TTL_SECONDS
             )
-            options["auth_token"] = {"key": settings.CLOUDINARY_AUTH_TOKEN_KEY, "duration": ttl}
+            options["auth_token"] = {"key": settings.cloudinary_auth_token_key, "duration": ttl}
     url, _ = sdk.utils.cloudinary_url(parsed.public_id, **options)
     return url
 
