@@ -257,9 +257,6 @@ class AttachmentUploadOut(AttachmentOut):
 
 
 class MessageIn(BaseModel):
-    # Optional, because an image on its own is a complete message. A client
-    # photographing a loaded bar with "is this right?" implied does not need to
-    # be forced to type a caption before the send button works.
     body: str = Field(default="", max_length=4000)
     attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=6)
 
