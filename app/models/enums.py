@@ -137,6 +137,15 @@ class Equipment(StrEnum):
     SLED = "sled"
     CARDIO_MACHINE = "cardio_machine"
 
+    # Added with the expanded library (migration 0011). Mirrors the equipment
+    # filter the coach knows from MuscleWiki / Muscle & Strength.
+    EXERCISE_BALL = "exercise_ball"
+    BOSU_BALL = "bosu_ball"
+    LANDMINE = "landmine"
+    PLYO_BOX = "plyo_box"
+    YOGA = "yoga"
+    PILATES = "pilates"
+
 
 EQUIPMENT_LABELS: dict[Equipment, str] = {
     Equipment.BARBELL: "Barbell",
@@ -145,18 +154,24 @@ EQUIPMENT_LABELS: dict[Equipment, str] = {
     Equipment.CABLE: "Cable",
     Equipment.BODYWEIGHT: "Bodyweight",
     Equipment.KETTLEBELL: "Kettlebell",
-    Equipment.BAND: "Resistance Band",
+    Equipment.BAND: "Band",
     Equipment.OTHER: "Other",
     Equipment.EZ_BAR: "EZ Bar",
     Equipment.SMITH_MACHINE: "Smith Machine",
     Equipment.MEDICINE_BALL: "Medicine Ball",
-    Equipment.WEIGHT_PLATE: "Weight Plate",
+    Equipment.WEIGHT_PLATE: "Plate",
     Equipment.TRAP_BAR: "Trap Bar",
-    Equipment.SUSPENSION: "Suspension Trainer",
-    Equipment.STRETCH: "Stretch",
-    Equipment.FOAM_ROLLER: "Foam Roller",
+    Equipment.SUSPENSION: "TRX / Suspension",
+    Equipment.STRETCH: "Stretches",
+    Equipment.FOAM_ROLLER: "Recovery / Foam Roller",
     Equipment.SLED: "Sled",
-    Equipment.CARDIO_MACHINE: "Cardio Machine",
+    Equipment.CARDIO_MACHINE: "Cardio",
+    Equipment.EXERCISE_BALL: "Exercise Ball",
+    Equipment.BOSU_BALL: "Bosu Ball",
+    Equipment.LANDMINE: "Landmine",
+    Equipment.PLYO_BOX: "Plyo Box",
+    Equipment.YOGA: "Yoga",
+    Equipment.PILATES: "Pilates",
 }
 
 
@@ -305,15 +320,9 @@ class SubscriptionStatus(StrEnum):
     PAUSED = "paused"
 
 
-# The statuses that actually entitle someone to their coaching tier.
-# `past_due` is deliberately included: a failed card should not lock a paying
-# client out of their programme mid-week while Stripe retries. Stripe moves the
-# subscription to `unpaid` or `canceled` when retries are exhausted, and that is
-# the point where access stops.
 ENTITLING_STATUSES = frozenset(
     {SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE}
 )
-
 
 class PaymentStatus(StrEnum):
     PENDING = "pending"
