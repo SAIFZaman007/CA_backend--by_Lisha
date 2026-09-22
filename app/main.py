@@ -37,6 +37,20 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("SELECT 1"))
     log.info("startup", environment=settings.ENVIRONMENT)
 
+    # The canonical domain feeds the sitemap and robots.txt. If it is not the
+    # domain the site is actually served on, Google ignores the sitemap.
+    from urllib.parse import urlparse
+
+    canonical_host = urlparse(settings.canonical_origin).hostname
+    frontend_host = urlparse(settings.FRONTEND_URL).hostname
+    if settings.is_production and canonical_host != frontend_host:
+        log.warning(
+            "seo.canonical_mismatch",
+            canonical=settings.canonical_origin,
+            frontend=settings.FRONTEND_URL,
+            detail="CANONICAL_SITE_URL should be the live public domain (same as VITE_SITE_URL).",
+        )
+
     from app.services import storage
 
     media = storage.describe()

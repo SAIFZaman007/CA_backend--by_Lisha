@@ -188,7 +188,10 @@ class Settings(BaseSettings):
         return v
 
     # --- SEO ----------------------------------------------------------------
-    CANONICAL_SITE_URL: str = "https://coach-auto.maktechgroups.com"
+    # The ONE public domain. Sitemap, robots.txt and every canonical URL use
+    # it; it must equal VITE_SITE_URL on the frontend. A sitemap listing a
+    # different domain than the one Google crawls is ignored outright.
+    CANONICAL_SITE_URL: str = "https://autonomyfitness.press"
     SEO_DEFAULT_IMAGE: str = "/images/og-cover.jpg"
     SEO_LOCALE: str = "en_US"
     BUSINESS_REGION: str = "US"

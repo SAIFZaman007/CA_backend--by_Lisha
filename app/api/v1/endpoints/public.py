@@ -225,6 +225,7 @@ async def sitemap(db: DbSession) -> Response:
     entries = [
         _url_entry(f"{origin}{path}", lastmod=None, changefreq=freq, priority=priority)
         for path, freq, priority in _STATIC_ROUTES
+        if path != "/gallery"  # added below, with its images, exactly once
     ]
 
     programs = (
@@ -260,7 +261,11 @@ async def sitemap(db: DbSession) -> Response:
         .scalars()
         .all()
     )
-    if images:
+    if not images:
+        entries.append(
+            _url_entry(f"{origin}/gallery", lastmod=None, changefreq="weekly", priority="0.8")
+        )
+    else:
         image_nodes = "\n".join(
             "    <image:image>\n"
             f"      <image:loc>{escape(_gallery_image_loc(origin, image))}</image:loc>\n"
