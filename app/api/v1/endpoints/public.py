@@ -294,6 +294,22 @@ async def sitemap(db: DbSession) -> Response:
     )
 
 
+@router.get("/meta/indexnow/{key}.txt", include_in_schema=False)
+async def indexnow_key(key: str) -> PlainTextResponse:
+    """The IndexNow key file, served at the site root by nginx (`/<key>.txt`).
+
+    Answers only for the configured key, so the route cannot be used to probe
+    for anything else. See app/services/indexnow.py.
+    """
+    from app.services.indexnow import key_is_valid  # noqa: PLC0415
+
+    if not key_is_valid() or key != settings.INDEXNOW_KEY:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found.")
+    return PlainTextResponse(
+        settings.INDEXNOW_KEY, headers={"Cache-Control": "public, max-age=86400"}
+    )
+
+
 @router.get("/meta/robots.txt", include_in_schema=False)
 async def robots() -> PlainTextResponse:
     """

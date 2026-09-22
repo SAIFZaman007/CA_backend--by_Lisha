@@ -71,6 +71,22 @@ async def lifespan(app: FastAPI):
             "redeploy. Set CLOUDINARY_URL (or STORAGE_BACKEND=cloudinary).",
         )
 
+    # IndexNow: push every public URL to Bing & co. once per production start,
+    # in the background (never delays startup, never fails it).
+    from app.services import indexnow
+
+    if settings.is_production and indexnow.key_is_valid():
+
+        async def _indexnow() -> None:
+            await asyncio.sleep(20)  # let the frontend finish rolling out first
+            try:
+                async with SessionLocal() as db:
+                    await indexnow.submit_all(db)
+            except Exception as exc:  # noqa: BLE001 — best effort
+                log.warning("seo.indexnow_failed", error=str(exc))
+
+        app.state.indexnow = asyncio.create_task(_indexnow())
+
     if settings.SEED_ON_STARTUP:
         from app.services.seed import run_seed
 

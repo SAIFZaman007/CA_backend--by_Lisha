@@ -192,6 +192,11 @@ class Settings(BaseSettings):
     # it; it must equal VITE_SITE_URL on the frontend. A sitemap listing a
     # different domain than the one Google crawls is ignored outright.
     CANONICAL_SITE_URL: str = "https://autonomyfitness.press"
+    # IndexNow key (Bing, Yandex, Seznam… — and so ChatGPT search / Copilot).
+    # Any 8-128 letters/digits/dashes, e.g. `python -c "import uuid;print(uuid.uuid4().hex)"`.
+    # Served at <site>/<key>.txt; public URLs are submitted on each production
+    # start. Blank disables it. See app/services/indexnow.py.
+    INDEXNOW_KEY: str = ""
     SEO_DEFAULT_IMAGE: str = "/images/og-cover.jpg"
     SEO_LOCALE: str = "en_US"
     BUSINESS_REGION: str = "US"

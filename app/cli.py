@@ -387,6 +387,15 @@ async def cmd_healthcheck(args: argparse.Namespace) -> int:
     return EXIT_OK if ok else EXIT_FAILED
 
 
+async def cmd_indexnow(args: argparse.Namespace) -> int:
+    from app.services import indexnow  # noqa: PLC0415
+
+    async with SessionLocal() as db:
+        ok, message = await indexnow.submit_all(db)
+    print(message)
+    return EXIT_OK if ok else EXIT_FAILED
+
+
 # --- Wiring --------------------------------------------------------------------
 
 Handler = Callable[[argparse.Namespace], Awaitable[int]]
@@ -467,6 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add("meal-plans", cmd_meal_plans, "Create automatic meal plans for subscribed clients.")
     add("healthcheck", cmd_healthcheck, "Verify the database connection.")
+    add("indexnow", cmd_indexnow, "Submit every public URL to IndexNow (Bing, Yandex…).")
 
     return parser
 
