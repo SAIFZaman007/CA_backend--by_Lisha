@@ -4,6 +4,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -59,9 +60,6 @@ class ClientProfile(UUIDMixin, TimestampMixin, Base):
     )
 
     # Coaching assignment
-    # No level until a plan has actually been paid for. A fresh sign-up is a
-    # real account with a real profile, but it is entitled to no coaching tier
-    # until Stripe confirms a payment, so this stays NULL.
     level: Mapped[TrainingLevel | None] = mapped_column(
         Enum(TrainingLevel, name="training_level"), default=None, nullable=True
     )
@@ -78,6 +76,18 @@ class ClientProfile(UUIDMixin, TimestampMixin, Base):
     weekly_workout_target: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     sleep_target_hours: Mapped[float] = mapped_column(Numeric(3, 1), default=8.0, nullable=False)
     weekly_cardio_target_min: Mapped[int] = mapped_column(Integer, default=150, nullable=False)
+
+    # --- Training intake ----------------------------------------------------
+    training_location: Mapped[str | None] = mapped_column(String(16))
+    training_experience: Mapped[str | None] = mapped_column(String(16))
+    available_equipment: Mapped[list[str]] = mapped_column(
+        ARRAY(String(32)), default=list, server_default="{}", nullable=False
+    )
+    session_minutes: Mapped[int] = mapped_column(
+        Integer, default=45, server_default="45", nullable=False
+    )
+
+    intake_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     timezone: Mapped[str] = mapped_column(String(64), default="America/Chicago", nullable=False)
     medical_notes: Mapped[str | None] = mapped_column(Text)
@@ -101,11 +111,6 @@ class RefreshSession(UUIDMixin, TimestampMixin, Base):
     user_agent: Mapped[str | None] = mapped_column(String(300))
     ip_address: Mapped[str | None] = mapped_column(String(64))
 
-    # The session issued when this one was rotated out. Two things need it:
-    # a benign double-refresh (React StrictMode, a retried request, a duplicated
-    # tab) can be answered from the replacement instead of being treated as a
-    # breach; and genuine token theft can be traced along the chain so the whole
-    # family is revoked at once.
     replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("refresh_sessions.id", ondelete="SET NULL")
     )

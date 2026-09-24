@@ -41,6 +41,32 @@ class UnitSystem(StrEnum):
     IMPERIAL = "imperial"
 
 
+class TrainingLocation(StrEnum):
+    """Where the client trains — the first question the plan builder asks.
+
+    Stored as text rather than a native PostgreSQL enum: these values come from
+    an intake form that will grow ("outdoors", "studio"), and adding a value to
+    a native enum is a migration, while adding one here is a line of code.
+    """
+
+    GYM = "gym"
+    HOME = "home"
+    HYBRID = "hybrid"
+
+
+class TrainingExperience(StrEnum):
+    """How long they have trained — decides volume, not entitlement.
+
+    Distinct from `TrainingLevel`, which is the coaching tier they pay for. A
+    Level 3 client can be a beginner in the gym, and a beginner on Level 1 can
+    have lifted for a decade.
+    """
+
+    BEGINNER = "beginner"
+    INTERMEDIATE = "intermediate"
+    ADVANCED = "advanced"
+
+
 class MuscleGroup(StrEnum):
     """The muscle-group taxonomy the coach browses the library by.
 

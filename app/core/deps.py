@@ -1,10 +1,12 @@
-"""Reusable FastAPI dependencies: current user, role gates, paid-feature gates."""
+"""
+Reusable FastAPI dependencies: current user, role gates, paid-feature gates.
+"""
 
 import uuid
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +101,9 @@ CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 
 UPGRADE_MESSAGE = "Upgrade to a suitable program to unlock direct coaching and personalized guidance."
 
+# The query parameter a signed media link arrives with (see `core.media`).
+MEDIA_TOKEN_PARAM = "token"
+
 
 async def get_entitlement(db: DbSession, user: CurrentUser) -> Entitlement:
     """What the signed-in account has paid for, resolved once per request."""
@@ -122,7 +127,16 @@ def require_feature(feature: str) -> Callable[..., Coroutine[Any, Any, Entitleme
     the feature and where to buy it, so the client never hard-codes copy.
     """
 
-    async def guard(entitlement: CurrentEntitlement) -> Entitlement:
+    async def guard(
+        request: Request,
+        db: DbSession,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    ) -> Entitlement | None:
+        if credentials is None and request.query_params.get(MEDIA_TOKEN_PARAM):
+            return None
+
+        user = await get_current_user(db, credentials)
+        entitlement = await entitlement_for(db, user)
         if not entitlement.has(feature):
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,

@@ -45,6 +45,9 @@ class WorkoutPlan(UUIDMixin, TimestampMixin, Base):
     total_weeks: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     is_custom: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual", nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
     days: Mapped[list["WorkoutDay"]] = relationship(

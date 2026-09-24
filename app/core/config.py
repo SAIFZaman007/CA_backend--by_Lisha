@@ -149,8 +149,12 @@ class Settings(BaseSettings):
             return True
         return self.cloudinary_configured
 
-    # --- Nutrition automation ----------------------------------------------
+    # --- Coaching automation ------------------------------------------------
     AUTO_MEAL_PLAN_ENABLED: bool = True
+    # Build a training block from the client's intake the moment it is in (and
+    # when a subscription starts, if the intake is already complete). Turning
+    # this off leaves training entirely to the coach; nothing else changes.
+    AUTO_WORKOUT_PLAN_ENABLED: bool = True
 
     # --- Stripe -------------------------------------------------------------
 

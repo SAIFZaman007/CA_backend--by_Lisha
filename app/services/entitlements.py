@@ -195,8 +195,14 @@ async def sync_profile_level(db: AsyncSession, client_id: uuid.UUID) -> Training
     await db.flush()
 
     if level is not None:
+        # Imported here rather than at module scope: both planners read
+        # entitlements to size a plan, and a top-level import would close the
+        # cycle. Neither call raises — a plan that cannot be built yet (an
+        # intake still to be filled in) must never fail a payment webhook.
         from app.services.meal_planner import ensure_auto_meal_plan  # noqa: PLC0415
+        from app.services.workout_planner import ensure_auto_workout_plan  # noqa: PLC0415
 
         await ensure_auto_meal_plan(db, client_id)
+        await ensure_auto_workout_plan(db, client_id, level=level)
 
     return level

@@ -7,6 +7,18 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql://coachauto:devpass@127.0.0.1:5432/coachauto_test"
 )
 os.environ.setdefault("COOKIE_SECURE", "false")
+# Media goes to a throwaway directory, never to the real Cloudinary account:
+# a test run must not upload anything, and must not need network access.
+# (Cleared rather than forcing STORAGE_BACKEND=local, so the storage-config
+# tests can still exercise the "auto" decision they were written for.)
+for _cloudinary_var in (
+    "CLOUDINARY_URL",
+    "CLOUDINARY_CLOUD_NAME",
+    "CLOUDINARY_API_KEY",
+    "CLOUDINARY_API_SECRET",
+):
+    os.environ.setdefault(_cloudinary_var, "")
+os.environ.setdefault("UPLOAD_DIR", "/tmp/coachauto-test-uploads")
 
 import uuid
 from datetime import UTC, datetime

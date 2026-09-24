@@ -1,11 +1,20 @@
 """Workout plan, session and set-logging payloads."""
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import SessionStatus, TrainingLevel
+from app.models.enums import (
+    Equipment,
+    Goal,
+    SessionStatus,
+    Sex,
+    TrainingExperience,
+    TrainingLevel,
+    TrainingLocation,
+    UnitSystem,
+)
 from app.schemas.catalog import ExerciseOut
 
 
@@ -45,7 +54,92 @@ class WorkoutPlanOut(BaseModel):
     total_weeks: int
     notes: str | None = None
     is_custom: bool
+    # "auto" (built from the client's intake) or "manual" (the coach's). The
+    # portal shows it, so a client always knows which they are looking at.
+    source: str = "manual"
     days: list[WorkoutDayOut]
+
+
+# --- Training intake ----------------------------------------------------------
+#
+# One form, two jobs: it is the client's profile *and* the input to the
+# automatic plan builder. Everything here is asked in plain language on
+# /portal/workout and validated at this boundary, so a plan is never built
+# from a number nobody could have typed.
+
+
+class IntakeIn(BaseModel):
+    """What the client fills in before their first automatic plan."""
+
+    # Body — the plan and the macros are both sized from these.
+    height_cm: float = Field(ge=90, le=250, description="Height in centimetres")
+    current_weight_kg: float = Field(ge=30, le=300, description="Body weight in kilograms")
+    goal_weight_kg: float | None = Field(default=None, ge=30, le=300)
+    date_of_birth: date | None = None
+    sex: Sex | None = None
+    unit_system: UnitSystem | None = None
+
+    # Training — what the block is actually built from.
+    goal: Goal
+    training_location: TrainingLocation
+    training_experience: TrainingExperience
+    # Empty means "whatever is normally in that place": everything in a gym,
+    # bodyweight and bands at home. Unknown values are ignored rather than
+    # rejected, so an older client build can never be locked out of the form.
+    available_equipment: list[Equipment] = Field(default_factory=list, max_length=30)
+    days_per_week: int = Field(ge=2, le=6)
+    session_minutes: int = Field(ge=20, le=120)
+
+    # Anything that should change what gets prescribed. Free text on purpose:
+    # a knee that hurts on lunges does not fit a checkbox.
+    medical_notes: str | None = Field(default=None, max_length=1000)
+
+
+class IntakeOut(BaseModel):
+    """The saved answers, plus what the portal needs to render the form."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    is_complete: bool
+    completed_at: datetime | None = None
+    height_cm: float | None = None
+    current_weight_kg: float | None = None
+    goal_weight_kg: float | None = None
+    date_of_birth: date | None = None
+    sex: Sex | None = None
+    unit_system: UnitSystem | None = None
+    goal: Goal | None = None
+    training_location: TrainingLocation | None = None
+    training_experience: TrainingExperience | None = None
+    available_equipment: list[str] = Field(default_factory=list)
+    days_per_week: int | None = None
+    session_minutes: int | None = None
+    medical_notes: str | None = None
+
+
+class EquipmentOption(BaseModel):
+    value: Equipment
+    label: str
+
+
+class IntakeFormOut(BaseModel):
+    """Answers and options together: one request fills the whole screen."""
+
+    intake: IntakeOut
+    equipment_options: list[EquipmentOption]
+    has_plan: bool
+    plan_source: str | None = None
+
+
+class IntakeResultOut(BaseModel):
+    """The answer to "I filled in the form": the plan it produced."""
+
+    intake: IntakeOut
+    plan: WorkoutPlanOut | None = None
+    # Populated when the intake saved but no plan could be built (no movement
+    # in the library matches that equipment, say), so the portal can say why
+    # instead of showing an empty Workout tab.
+    message: str | None = None
 
 
 class SetLogIn(BaseModel):

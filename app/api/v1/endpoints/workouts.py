@@ -1,4 +1,4 @@
-"""Training: read the assigned plan, build your own, log what you lifted."""
+"""Training: the intake, the plan built from it, and what the client lifted."""
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -8,7 +8,12 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.enums import SessionStatus, TrainingLevel
+from app.models.enums import (
+    EQUIPMENT_LABELS,
+    Equipment,
+    SessionStatus,
+    TrainingLevel,
+)
 from app.models.training import (
     SetLog,
     WorkoutDay,
@@ -16,14 +21,22 @@ from app.models.training import (
     WorkoutPlan,
     WorkoutSession,
 )
+from app.models.user import ClientProfile
 from app.schemas.training import (
     CustomPlanIn,
+    EquipmentOption,
+    IntakeFormOut,
+    IntakeIn,
+    IntakeOut,
+    IntakeResultOut,
     SessionStart,
     SessionUpdate,
     SetLogIn,
     WorkoutPlanOut,
     WorkoutSessionOut,
 )
+from app.services import workout_planner
+from app.services.workout_planner import SOURCE_AUTO, WorkoutPlanInputError
 
 router = APIRouter(prefix="/workouts", tags=["workouts"])
 
@@ -53,6 +66,161 @@ async def _owned_day(db: DbSession, day_id: uuid.UUID, client_id: uuid.UUID) -> 
     if day is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That training day is not yours.")
     return day
+
+
+# --- Intake and the automatic plan ---------------------------------------------
+
+async def _profile(db: DbSession, user: CurrentUser) -> ClientProfile:
+    profile = (
+        (await db.execute(select(ClientProfile).where(ClientProfile.user_id == user.id)))
+        .scalars()
+        .first()
+    )
+    if profile is None:
+        profile = ClientProfile(user_id=user.id)
+        db.add(profile)
+        await db.flush()
+    return profile
+
+
+def _intake_out(profile: ClientProfile) -> IntakeOut:
+    return IntakeOut(
+        is_complete=profile.intake_completed_at is not None,
+        completed_at=profile.intake_completed_at,
+        height_cm=float(profile.height_cm) if profile.height_cm else None,
+        current_weight_kg=(
+            float(profile.current_weight_kg) if profile.current_weight_kg else None
+        ),
+        goal_weight_kg=float(profile.goal_weight_kg) if profile.goal_weight_kg else None,
+        date_of_birth=profile.date_of_birth,
+        sex=profile.sex,
+        unit_system=profile.unit_system,
+        goal=profile.goal,
+        training_location=profile.training_location,
+        training_experience=profile.training_experience,
+        available_equipment=list(profile.available_equipment or []),
+        days_per_week=profile.weekly_workout_target,
+        session_minutes=profile.session_minutes,
+        medical_notes=profile.medical_notes,
+    )
+
+
+# Equipment a client can plausibly own or find, in the order the form shows it.
+# Stretching and recovery kit is left out: it is assumed everywhere, and a
+# checklist of twenty-four items is a form nobody finishes.
+INTAKE_EQUIPMENT: tuple[Equipment, ...] = (
+    Equipment.BODYWEIGHT,
+    Equipment.DUMBBELL,
+    Equipment.BARBELL,
+    Equipment.KETTLEBELL,
+    Equipment.BAND,
+    Equipment.MACHINE,
+    Equipment.CABLE,
+    Equipment.SMITH_MACHINE,
+    Equipment.EZ_BAR,
+    Equipment.TRAP_BAR,
+    Equipment.LANDMINE,
+    Equipment.SUSPENSION,
+    Equipment.MEDICINE_BALL,
+    Equipment.EXERCISE_BALL,
+    Equipment.PLYO_BOX,
+    Equipment.WEIGHT_PLATE,
+    Equipment.CARDIO_MACHINE,
+)
+
+
+@router.get("/intake", response_model=IntakeFormOut)
+async def get_intake(user: CurrentUser, db: DbSession) -> IntakeFormOut:
+    """The client's saved answers and the options the form offers."""
+    profile = await _profile(db, user)
+    plan = await workout_planner.active_plan(db, user.id)
+    return IntakeFormOut(
+        intake=_intake_out(profile),
+        equipment_options=[
+            EquipmentOption(value=item, label=EQUIPMENT_LABELS[item]) for item in INTAKE_EQUIPMENT
+        ],
+        has_plan=plan is not None,
+        plan_source=plan.source if plan else None,
+    )
+
+
+@router.put("/intake", response_model=IntakeResultOut)
+async def save_intake(payload: IntakeIn, user: CurrentUser, db: DbSession) -> IntakeResultOut:
+    """
+    Save the intake — and hand back a training plan built from it.
+
+    One request, because that is the promise the form makes: fill this in and
+    your programme is there. Splitting it into "save" then "generate" would
+    leave a client staring at an empty Workout tab if the second call failed.
+
+    Idempotent: answering it again updates the profile and rebuilds the block,
+    unless the coach has since written one of their own — theirs wins, and the
+    client is told so rather than silently losing it.
+    """
+    profile = await _profile(db, user)
+
+    profile.height_cm = payload.height_cm
+    profile.current_weight_kg = payload.current_weight_kg
+    if profile.starting_weight_kg is None:
+        profile.starting_weight_kg = payload.current_weight_kg
+    if payload.goal_weight_kg is not None:
+        profile.goal_weight_kg = payload.goal_weight_kg
+    if payload.date_of_birth is not None:
+        profile.date_of_birth = payload.date_of_birth
+    if payload.sex is not None:
+        profile.sex = payload.sex
+    if payload.unit_system is not None:
+        profile.unit_system = payload.unit_system
+
+    profile.goal = payload.goal
+    profile.training_location = payload.training_location.value
+    profile.training_experience = payload.training_experience.value
+    profile.available_equipment = [item.value for item in payload.available_equipment]
+    profile.weekly_workout_target = payload.days_per_week
+    profile.session_minutes = payload.session_minutes
+    profile.medical_notes = payload.medical_notes
+    profile.onboarding_completed = True
+    profile.intake_completed_at = datetime.now(UTC)
+    await db.flush()
+
+    plan, message = await _rebuild_plan(db, user)
+    return IntakeResultOut(intake=_intake_out(profile), plan=plan, message=message)
+
+
+@router.post("/plan/generate", response_model=IntakeResultOut)
+async def regenerate_plan(user: CurrentUser, db: DbSession) -> IntakeResultOut:
+    """
+    Rebuild the automatic block — after a weight change, or for a fresh block.
+
+    Refuses when the active plan is the coach's: replacing prescribed training
+    with a generated block is not a decision a button should make.
+    """
+    profile = await _profile(db, user)
+    if profile.intake_completed_at is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Complete your training intake first — it is what the plan is built from.",
+        )
+    plan, message = await _rebuild_plan(db, user)
+    return IntakeResultOut(intake=_intake_out(profile), plan=plan, message=message)
+
+
+async def _rebuild_plan(db: DbSession, user: CurrentUser) -> tuple[WorkoutPlan | None, str | None]:
+    """Build a fresh automatic plan, leaving a coach-written one untouched."""
+    current = await workout_planner.active_plan(db, user.id)
+    if current is not None and current.source != SOURCE_AUTO:
+        return (
+            await _load_plan_by_id(db, current.id),
+            "Your coach has written your current plan, so it has been kept. "
+            "Message them if you would like it rebuilt around your new answers.",
+        )
+
+    level = user.profile.level if user.profile else None
+    try:
+        plan = await workout_planner.generate_workout_plan(db, user.id, level=level)
+    except WorkoutPlanInputError as exc:
+        return None, str(exc)
+    return plan, None
 
 
 @router.get("/plan", response_model=WorkoutPlanOut | None)

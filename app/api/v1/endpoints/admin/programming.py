@@ -21,6 +21,7 @@ from app.models.training import WorkoutDay, WorkoutDayExercise, WorkoutPlan
 from app.models.user import User
 from app.schemas.admin import (
     AutoMealPlanIn,
+    AutoWorkoutPlanIn,
     MealOut,
     MealPlanIn,
     MealPlanOut,
@@ -31,6 +32,7 @@ from app.schemas.admin import (
 )
 from app.services.meal_planner import SOURCE_MANUAL, MealPlanInputError, generate_meal_plan
 from app.services.programming import assert_every_movement_has_video
+from app.services.workout_planner import WorkoutPlanInputError, generate_workout_plan
 
 router = APIRouter()
 log = get_logger("admin.programming")
@@ -62,6 +64,7 @@ def _plan_out(plan: WorkoutPlan, video_index: dict | None = None) -> WorkoutPlan
         notes=plan.notes,
         is_custom=plan.is_custom,
         is_active=plan.is_active,
+        source=plan.source,
         created_at=plan.created_at,
         days=[
             PlanDayOut(
@@ -228,6 +231,10 @@ async def create_plan(
         notes=payload.notes,
         is_custom=False,
         is_active=payload.is_active,
+        # Written by a person. `services.workout_planner` never rebuilds or
+        # replaces a plan carrying this, however often the client re-runs
+        # their intake.
+        source=SOURCE_MANUAL,
     )
     db.add(plan)
     await db.flush()
@@ -238,6 +245,32 @@ async def create_plan(
 
     await db.refresh(plan, ["days"])
     log.info("admin.plan_created", client_id=str(client_id), plan_id=str(plan.id))
+    return _plan_out(plan)
+
+
+@router.post(
+    "/clients/{client_id}/plans/auto",
+    response_model=WorkoutPlanOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_auto_workout_plan(
+    client_id: uuid.UUID, payload: AutoWorkoutPlanIn, coach: CurrentCoach, db: DbSession
+) -> WorkoutPlanOut:
+    """Build a training block from the client's intake — the same generator a
+    new client gets automatically once they have filled the form in.
+
+    This is the manual half of the promise: the coach can produce a starting
+    block for a client on demand, then edit it like any other plan. It creates
+    a new plan rather than overwriting one, so nothing already written is lost.
+    """
+    await _require_client(db, client_id)
+    try:
+        plan = await generate_workout_plan(
+            db, client_id, assigned_by_id=coach.id, activate=payload.activate
+        )
+    except WorkoutPlanInputError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    log.info("admin.plan_auto_generated", client_id=str(client_id), plan_id=str(plan.id))
     return _plan_out(plan)
 
 

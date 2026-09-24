@@ -6,8 +6,8 @@ read models here are deliberately explicit about what leaves the database.
 """
 
 import uuid
-from typing import Literal
 from datetime import date, datetime, time
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -295,6 +295,10 @@ class WorkoutPlanOut(BaseModel):
     notes: str | None = None
     is_custom: bool
     is_active: bool
+    # "auto" (built by `services.workout_planner` from the client's intake) or
+    # "manual" (written by the coach). The roster shows it so nobody has to
+    # guess which blocks are safe to rebuild.
+    source: str = "manual"
     created_at: datetime
     days: list[PlanDayOut]
 
@@ -343,6 +347,12 @@ class MealOut(BaseModel):
 
 class AutoMealPlanIn(BaseModel):
     """Options for generating a plan from the client's numbers."""
+
+    activate: bool = True
+
+
+class AutoWorkoutPlanIn(BaseModel):
+    """Options for generating a training block from the client's intake."""
 
     activate: bool = True
 
