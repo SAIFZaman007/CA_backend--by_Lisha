@@ -330,6 +330,44 @@ def password_reset(reset_url: str, expires_minutes: int) -> tuple[str, str, str]
     return subject, text, html
 
 
+def password_changed(name: str, reset_url: str) -> tuple[str, str, str]:
+    """Security notice after a signed-in password change.
+
+    Deliberately carries no secret and no one-click undo: the only useful
+    action for someone who did not make the change is a fresh reset, which
+    proves control of this inbox.
+    """
+    subject = f"Your {settings.BRAND_NAME} password was changed"
+
+    text = (
+        f"Hi {name},\n\n"
+        f"The password on your {settings.BRAND_NAME} account was just changed, and any "
+        "other devices signed in to it were signed out.\n\n"
+        "If this was you, there is nothing else to do.\n\n"
+        "If it was not you, reset your password now:\n"
+        f"{reset_url}\n\n"
+        f"Then write to {settings.SUPPORT_EMAIL} so we can check the account.\n\n"
+        f"— {settings.BRAND_NAME} | {settings.BUSINESS_NAME}"
+    )
+
+    html = render(
+        preheader="Your password was changed. Other devices were signed out.",
+        eyebrow="Security notice",
+        heading="Your password was changed",
+        paragraphs=[
+            f"Hi {escape(name)}, the password on your {escape(settings.BRAND_NAME)} account "
+            "was just changed, and any other devices signed in to it were signed out.",
+            "If this was you, there is nothing else to do.",
+            "If it was not you, reset your password straight away using the button below, "
+            f"then write to {escape(settings.SUPPORT_EMAIL)} so the account can be checked.",
+        ],
+        cta_label="Reset my password",
+        cta_url=reset_url,
+        footnote="You are receiving this because it is a security change on your account.",
+    )
+    return subject, text, html
+
+
 def coach_new_lead(
     name: str, email: str, goal: str | None, phone: str | None = None
 ) -> tuple[str, str, str]:

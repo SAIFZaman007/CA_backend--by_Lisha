@@ -1,4 +1,5 @@
-"""Registration, sign-in, token refresh and password reset.
+"""
+Registration, sign-in, token refresh and password reset.
 
 Access tokens are short-lived and returned in the response body for the SPA to
 hold in memory. Refresh tokens live in an HttpOnly, SameSite cookie and are
@@ -36,7 +37,7 @@ from app.schemas.user import (
     TokenResponse,
     UserOut,
 )
-from app.services.email import send_password_reset, send_welcome
+from app.services.email import send_password_changed, send_password_reset, send_welcome
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = get_logger("auth")
@@ -379,15 +380,68 @@ async def reset_password(
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
 async def change_password(
-    payload: ChangePasswordRequest, user: CurrentUser, db: DbSession
+    request: Request,
+    response: Response,
+    payload: ChangePasswordRequest,
+    user: CurrentUser,
+    db: DbSession,
 ) -> None:
+    """
+    Change the signed-in account's password. Used by both apps — the client
+    portal's profile screen and the coach dashboard's Account settings.
+
+    * Rate-limited like sign-in: the current password is a secret, and an
+      endpoint that confirms it is a guessing oracle for anyone holding a
+      stolen access token.
+    * Every *other* session is signed out. Changing a password is the usual
+      response to "someone else might be in my account"; leaving their
+      sessions alive would make it cosmetic. The browser making the change
+      keeps its session (identified by its own refresh cookie), so the person
+      is not thrown to the sign-in screen for doing the right thing.
+    * Outstanding reset links die automatically: they are fingerprinted with
+      the old password hash (see `security.create_reset_token`).
+    * The account's email gets a notice, so a change nobody asked for is
+      noticed by the one person who can act on it.
+    """
     if not verify_password(payload.current_password, user.hashed_password):
+        log.warning("auth.password_change_rejected", user_id=str(user.id))
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, detail="Your current password is not correct."
         )
+    if verify_password(payload.new_password, user.hashed_password):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Choose a new password that is different from your current one.",
+        )
+
     user.hashed_password = hash_password(payload.new_password)
     db.add(user)
+
+    # The caller's own session(s): whichever of the two app cookies this
+    # browser holds. Anything not in this set is another device.
+    keep = {
+        hash_token(token)
+        for token in (request.cookies.get(name) for name in REFRESH_COOKIE_NAMES.values())
+        if token
+    }
+    now = datetime.now(UTC)
+    revoked = 0
+    for session in (
+        await db.execute(
+            select(RefreshSession).where(
+                RefreshSession.user_id == user.id, RefreshSession.revoked_at.is_(None)
+            )
+        )
+    ).scalars():
+        if session.token_hash not in keep:
+            session.revoked_at = now
+            revoked += 1
+
+    await db.flush()
+    await send_password_changed(user.email, user.full_name.split()[0])
+    log.info("auth.password_changed", user_id=str(user.id), other_sessions_revoked=revoked)
 
 
 @router.get("/me", response_model=UserOut)

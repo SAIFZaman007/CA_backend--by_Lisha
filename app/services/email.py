@@ -133,6 +133,12 @@ async def send_password_reset(to: str, token: str) -> None:
     queue_email(to, subject, text, html)
 
 
+async def send_password_changed(to: str, name: str) -> None:
+    link = f"{settings.FRONTEND_URL.rstrip('/')}/forgot-password"
+    subject, text, html = templates.password_changed(name, link)
+    queue_email(to, subject, text, html)
+
+
 async def send_welcome(to: str, name: str) -> None:
     link = f"{settings.FRONTEND_URL.rstrip('/')}/login"
     subject, text, html = templates.welcome(name, link)

@@ -33,7 +33,7 @@ from app.schemas.media import (
     default_thumbnail,
     detect_provider,
 )
-from app.services import storage
+from app.services import roster, storage
 
 router = APIRouter()
 log = get_logger("admin.catalog")
@@ -55,6 +55,13 @@ def _serialise_tutorial(tutorial: VideoTutorial, viewer_id: uuid.UUID) -> Tutori
         data.video_url = stream_url(tutorial, viewer_id)
     data.thumbnail_url = resolve_thumbnail(tutorial, viewer_id)
     return data
+
+
+def _serialise_program(program: Program, client_count: int = 0) -> ProgramAdminOut:
+    """The dashboard's view of one tier: stored fields plus derived ones."""
+    return ProgramAdminOut.model_validate(program).model_copy(
+        update={"client_count": client_count, "image_url": _image_url(program)}
+    )
 
 
 def _image_url(program: Program) -> str | None:
@@ -91,28 +98,24 @@ async def list_programs(
     db: DbSession,
     include_archived: bool = Query(True),
 ) -> list[ProgramAdminOut]:
-    counts = (
-        select(WorkoutPlan.program_id.label("pid"), func.count(WorkoutPlan.id).label("n"))
-        .where(WorkoutPlan.program_id.is_not(None), WorkoutPlan.is_active.is_(True))
-        .group_by(WorkoutPlan.program_id)
-        .subquery()
-    )
+    """
+    Every tier, each with a live count of the active clients on it.
 
-    stmt = (
-        select(Program, func.coalesce(counts.c.n, 0))
-        .outerjoin(counts, counts.c.pid == Program.id)
-        .order_by(Program.sort_order, Program.price_cents)
-    )
-    if not include_archived:
-        stmt = stmt.where(Program.is_active.is_(True))
+    The count comes from `services.roster` — subscriptions first, the coach's
+    level assignment second — so it moves the moment a client subscribes, is
+    assigned a level, is switched off or leaves.
+    """
+    stmt = select(Program).order_by(Program.sort_order, Program.price_cents)
+    all_programs = (await db.execute(stmt)).scalars().all()
 
-    rows = (await db.execute(stmt)).all()
-    return [
-        ProgramAdminOut.model_validate(program).model_copy(
-            update={"client_count": count, "image_url": _image_url(program)}
-        )
-        for program, count in rows
-    ]
+    # Counted against every plan, archived included, so a level whose current
+    # tier is archived still resolves to the same owner the delete guard uses.
+    counts = await roster.program_client_counts(db, all_programs)
+
+    visible = (
+        all_programs if include_archived else [p for p in all_programs if p.is_active]
+    )
+    return [_serialise_program(program, counts.get(program.id, 0)) for program in visible]
 
 
 @router.post("/programs", response_model=ProgramAdminOut, status_code=status.HTTP_201_CREATED)
@@ -127,9 +130,8 @@ async def create_program(
     await db.flush()
     await db.refresh(program)
     log.info("admin.program_created", program_id=str(program.id), by=str(coach.id))
-    return ProgramAdminOut.model_validate(program).model_copy(
-        update={"image_url": _image_url(program)}
-    )
+    # A new tier can already own a level that hand-assigned clients carry.
+    return _serialise_program(program, await roster.program_client_count(db, program))
 
 
 @router.patch("/programs/{program_id}", response_model=ProgramAdminOut)
@@ -148,9 +150,8 @@ async def update_program(
         setattr(program, field, value)
     await db.flush()
     await db.refresh(program)
-    return ProgramAdminOut.model_validate(program).model_copy(
-        update={"image_url": _image_url(program)}
-    )
+    # Level, order and listing all feed attribution, so recount after the edit.
+    return _serialise_program(program, await roster.program_client_count(db, program))
 
 
 @router.delete("/programs/{program_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -169,20 +170,23 @@ async def delete_program(
     if program is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="That plan was not found.")
 
-    in_use = (
-        await db.execute(
-            select(func.count(WorkoutPlan.id)).where(
-                WorkoutPlan.program_id == program_id, WorkoutPlan.is_active.is_(True)
-            )
-        )
-    ).scalar_one()
-
     if hard:
+        # Two independent reasons a tier is "in use": people on it (the number
+        # on the card) and training blocks that still reference it by id.
+        clients_on_plan = await roster.program_client_count(db, program)
+        linked_blocks = (
+            await db.execute(
+                select(func.count(WorkoutPlan.id)).where(
+                    WorkoutPlan.program_id == program_id, WorkoutPlan.is_active.is_(True)
+                )
+            )
+        ).scalar_one()
+        in_use = max(clients_on_plan, linked_blocks)
         if in_use:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                detail=f"{in_use} client(s) are on this plan. Archive it instead, "
-                "or move them across first.",
+                detail=f"{in_use} client(s) are on this plan. "
+                "Archive it instead, or move them across first.",
             )
         await db.delete(program)
         log.warning("admin.program_deleted", program_id=str(program_id), by=str(coach.id))
